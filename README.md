@@ -1,8 +1,7 @@
 # Window Switcher
 
 A lightweight macOS utility that replaces the app-only Command+Tab with a
-**Windows-style Alt+Tab** that cycles through **individual windows** in
-most-recently-used order.
+**Windows-style Alt+Tab** that cycles through **individual windows**.
 
 Hold **Option**, press **Tab** to step forward (**Shift+Tab** to step back),
 release **Option** to focus the selected window. Each window — including
@@ -12,7 +11,9 @@ thumbnail, the app icon, and the window title.
 ## Features
 
 - **Per-window switching**, not per-app — three Chrome windows are three entries.
-- **MRU order**, like Windows Alt+Tab: the window you were just on comes first.
+- **Two-window toggle** — a quick tap flips between your two most recent windows,
+  just like Windows Alt+Tab (recently-used order by default; a *Fixed* mode that
+  keeps tiles in place is available in Settings).
 - **Hold-and-release gesture** — cycle while the modifier is down, commit on release.
 - **Rebindable shortcut** (Option / Command / Control × Tab / Backtick) via a
   native Settings window.
@@ -36,6 +37,20 @@ This compiles `Sources/*.swift` into `build/WindowSwitcher.app` and launches it.
 The app runs in the background (no Dock icon) with a menu-bar item
 (a stacked-rectangles glyph) for status and Quit.
 
+### Recommended: stable signing (run once)
+
+```bash
+./setup-signing.sh
+```
+
+By default `build.sh` uses an **ad-hoc** signature, which changes on every build
+— so macOS forgets your permission grants each rebuild. `setup-signing.sh`
+creates a local, self-signed code-signing certificate (in a dedicated throwaway
+keychain) that gives the app a **constant** code identity. After running it once,
+`build.sh` signs with that identity automatically and your Accessibility /
+Screen Recording grants **persist across rebuilds**. See
+[Permissions](#permissions) for details.
+
 ## Permissions
 
 On first launch a setup window guides you through two required permissions and
@@ -54,31 +69,31 @@ caches the old state inside the running process — Screen Recording especially)
 The setup window has a **Restart App** button for exactly this; use it after
 flipping a toggle.
 
-### If a permission still won't "stick"
+### Making grants survive rebuilds
 
-The build uses an **ad-hoc signature**, so every `./build.sh` produces a new
-code identity. A grant you gave to a *previous* build does not carry over, and
-you may see a stale entry in the Accessibility list. Reliable procedure:
+macOS ties a permission grant to the app's **code identity**. With the default
+ad-hoc signature that identity changes every build, so grants are forgotten each
+rebuild. Run `./setup-signing.sh` once (see above) to sign with a stable
+self-signed identity — then a grant given once persists across every future
+rebuild.
 
-1. Build once, launch, grant Accessibility (and optionally Screen Recording).
-2. Click **Restart App**.
-3. Avoid rebuilding after granting. If you do rebuild, reset the old grants
-   first:
-   ```bash
-   tccutil reset Accessibility com.example.windowswitcher
-   tccutil reset ScreenCapture   com.example.windowswitcher
-   ```
-   then relaunch and grant again.
+If you switch signing modes (ad-hoc ↔ stable) the identity changes one last
+time, so clear any stale entries and re-grant once:
 
-For a grant that survives rebuilds, sign with a stable identity (a self-signed
-or Developer ID certificate) instead of the ad-hoc `-` in `build.sh`.
+```bash
+tccutil reset Accessibility com.example.windowswitcher
+tccutil reset ScreenCapture com.example.windowswitcher
+```
+
+then relaunch and grant. A freshly-toggled permission usually needs a relaunch
+to take effect — the setup window's **Restart App** button does exactly that.
 
 ## How it works
 
 | Concern | Approach | File |
 |---|---|---|
 | Discover all real windows | `CGWindowListCopyWindowInfo`, filtered to layer‑0, visible, non‑system windows | `WindowEnumerator.swift` |
-| MRU ordering | Own list seeded from z‑order, bumped on switch and on app activation | `MRUWindowManager.swift` |
+| Window ordering | Fixed (stable positions) or recently‑used; own list seeded from z‑order | `WindowOrderManager.swift` |
 | Global Option+Tab, and detecting Option **release** | `CGEvent` tap on keyDown + flagsChanged | `HotKeyManager.swift` |
 | Focus one specific window | Accessibility API + `_AXUIElementGetWindow` to match by CGWindowID | `WindowActivator.swift` |
 | Live previews | On‑demand ScreenCaptureKit stills rendered at preview size, off the main thread | `ThumbnailProvider.swift` |
@@ -103,10 +118,12 @@ or Developer ID certificate) instead of the ad-hoc `-` in `build.sh`.
 
 ### Settings
 
-Open **Settings…** from the menu-bar item (or ⌘,) to rebind the shortcut:
+Open **Settings…** from the menu-bar item (or ⌘,):
 
 - **Modifier** — Option, Command, or Control.
 - **Trigger key** — Tab or Backtick (`` ` ``).
+- **Window order** — *Recently used* (default; last-used window first, so a quick
+  tap toggles between your two most recent windows) or *Fixed* (tiles never move).
 
 Changes persist (`UserDefaults`) and take effect on the next keystroke — the
 hot-key handler reads the binding live, so nothing needs restarting.
@@ -130,6 +147,7 @@ is why the minimum target is macOS 14.
 ```
 WindowSwitcher/
 ├── build.sh                 # Compile with swiftc + assemble a signed .app bundle
+├── setup-signing.sh         # One-time: create a stable self-signed identity
 ├── Info.plist               # Bundle metadata (LSUIElement agent, min OS, usage strings)
 ├── README.md
 └── Sources/
@@ -141,7 +159,7 @@ WindowSwitcher/
     ├── OnboardingWindow.swift   # First-run setup + Restart App
     ├── HotKeyManager.swift      # CGEvent tap: modifier+key, and modifier-release
     ├── WindowEnumerator.swift   # Discover + filter real windows
-    ├── MRUWindowManager.swift   # Most-recently-used ordering
+    ├── WindowOrderManager.swift # Fixed or recently-used ordering
     ├── WindowActivator.swift    # Focus one window by CGWindowID (AX API)
     ├── ThumbnailProvider.swift  # ScreenCaptureKit previews
     ├── SwitcherController.swift # Orchestration

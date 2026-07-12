@@ -1,5 +1,8 @@
 import AppKit
 import ScreenCaptureKit
+import os
+
+private let log = Logger(subsystem: "com.example.windowswitcher", category: "thumbnails")
 
 /// Renders downscaled preview images for windows using ScreenCaptureKit — the
 /// modern, non-deprecated capture API (macOS 14+).
@@ -22,22 +25,33 @@ enum ThumbnailProvider {
         for windowIDs: [CGWindowID],
         onImage: @escaping (CGWindowID, NSImage) -> Void
     ) {
+        log.notice("capture requested for \(windowIDs.count) windows; screenRecording granted=\(CGPreflightScreenCaptureAccess())")
         Task.detached(priority: .userInitiated) {
             // One shareable-content query covers every window we need.
-            guard let content = try? await SCShareableContent.excludingDesktopWindows(
-                false,
-                onScreenWindowsOnly: true
-            ) else { return }
+            let content: SCShareableContent
+            do {
+                content = try await SCShareableContent.excludingDesktopWindows(
+                    false, onScreenWindowsOnly: true
+                )
+            } catch {
+                log.error("SCShareableContent failed: \(error.localizedDescription, privacy: .public)")
+                return
+            }
+            log.notice("SCShareableContent returned \(content.windows.count) windows")
 
             // Index the SCWindows by their CGWindowID for fast lookup.
             var scWindowsByID: [CGWindowID: SCWindow] = [:]
             for scWindow in content.windows { scWindowsByID[scWindow.windowID] = scWindow }
 
+            var matched = 0, captured = 0
             for id in windowIDs {
                 guard let scWindow = scWindowsByID[id] else { continue }
+                matched += 1
                 guard let image = await capture(scWindow) else { continue }
+                captured += 1
                 await MainActor.run { onImage(id, image) }
             }
+            log.notice("matched \(matched)/\(windowIDs.count), captured \(captured)")
         }
     }
 
@@ -59,13 +73,15 @@ enum ThumbnailProvider {
         config.showsCursor = false
         config.ignoreGlobalClipDisplay = true
 
-        guard let cgImage = try? await SCScreenshotManager.captureImage(
-            contentFilter: filter,
-            configuration: config
-        ) else {
+        do {
+            let cgImage = try await SCScreenshotManager.captureImage(
+                contentFilter: filter,
+                configuration: config
+            )
+            return NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
+        } catch {
+            log.error("captureImage failed for window \(scWindow.windowID): \(error.localizedDescription, privacy: .public)")
             return nil
         }
-
-        return NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
     }
 }

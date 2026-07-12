@@ -40,11 +40,21 @@ swiftc \
 echo "==> Assembling bundle"
 cp "$ROOT/Info.plist" "$APP/Contents/Info.plist"
 
-# Ad-hoc code signature. A stable signature helps TCC remember the granted
-# permissions; ad-hoc is fine for local use (you may need to re-grant after a
-# rebuild). Replace "-" with a Developer ID for distribution.
-echo "==> Signing (ad-hoc)"
-codesign --force --deep --sign - "$APP" >/dev/null 2>&1 || true
+# Prefer the stable self-signed identity created by ./setup-signing.sh: it gives
+# the app a constant code identity, so macOS remembers Accessibility / Screen
+# Recording grants across rebuilds. Falls back to ad-hoc if it isn't set up.
+echo "==> Signing"
+CERT_CN="WindowSwitcher Self-Signed"
+SIGN_KEYCHAIN="$HOME/Library/Keychains/windowswitcher-signing.keychain-db"
+SIGN_KC_PASS="winswitch-local"   # unlocks only the dedicated signing keychain
+if security find-identity -p codesigning 2>/dev/null | grep -q "$CERT_CN"; then
+	[ -f "$SIGN_KEYCHAIN" ] && security unlock-keychain -p "$SIGN_KC_PASS" "$SIGN_KEYCHAIN" >/dev/null 2>&1 || true
+	codesign --force --deep --sign "$CERT_CN" --identifier com.example.windowswitcher "$APP"
+	echo "    signed with stable identity: $CERT_CN"
+else
+	codesign --force --deep --sign - "$APP" >/dev/null 2>&1 || true
+	echo "    signed ad-hoc — run ./setup-signing.sh once so grants persist across rebuilds"
+fi
 
 echo "==> Built: $APP"
 

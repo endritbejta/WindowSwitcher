@@ -23,6 +23,7 @@ enum WindowEnumerator {
         "SystemUIServer",
         "Wallpaper",
         "Screenshot",
+        "universalAccessAuthWarn",   // the system Accessibility-permission dialog
     ]
 
     /// Windows smaller than this in either dimension are treated as utility
@@ -64,6 +65,11 @@ enum WindowEnumerator {
         // Layer 0 is the normal application-window layer. Menus, the Dock, the
         // status bar, tooltips etc. all live on non-zero layers.
         guard let layer = dict[kCGWindowLayer as String] as? Int, layer == 0 else {
+            return nil
+        }
+
+        // Never list our own windows (the Settings / Setup panels).
+        if let pid = dict[kCGWindowOwnerPID as String] as? pid_t, pid == getpid() {
             return nil
         }
 

@@ -32,6 +32,23 @@ enum SwitchModifier: String, CaseIterable, Identifiable {
     }
 }
 
+/// How the switcher orders the window list.
+enum WindowOrder: String, CaseIterable, Identifiable {
+    /// Positions never change between switches — tiles stay put (default).
+    case fixed
+    /// The window you just used jumps to the front, like Windows Alt+Tab.
+    case recentlyUsed
+
+    var id: String { rawValue }
+
+    var display: String {
+        switch self {
+        case .fixed:        return "Fixed — tiles stay in place"
+        case .recentlyUsed: return "Recently used — last window first"
+        }
+    }
+}
+
 /// The key tapped to advance the selection.
 enum TriggerKey: String, CaseIterable, Identifiable {
     case tab, grave
@@ -70,6 +87,7 @@ final class AppSettings: ObservableObject {
     private enum Keys {
         static let modifier = "switch.modifier"
         static let triggerKey = "switch.triggerKey"
+        static let windowOrder = "switch.windowOrder"
     }
 
     /// Invoked after any change, so the app can refresh menu labels, etc.
@@ -89,9 +107,20 @@ final class AppSettings: ObservableObject {
         }
     }
 
+    @Published var windowOrder: WindowOrder {
+        didSet {
+            defaults.set(windowOrder.rawValue, forKey: Keys.windowOrder)
+            onChange?()
+        }
+    }
+
     private init() {
         modifier = SwitchModifier(rawValue: defaults.string(forKey: Keys.modifier) ?? "") ?? .option
         triggerKey = TriggerKey(rawValue: defaults.string(forKey: Keys.triggerKey) ?? "") ?? .tab
+        // Default to recently-used so a single tap flips between your two most
+        // recent windows (the core Windows Alt+Tab behavior). Fixed order stays
+        // available in Settings.
+        windowOrder = WindowOrder(rawValue: defaults.string(forKey: Keys.windowOrder) ?? "") ?? .recentlyUsed
     }
 
     /// e.g. "⌥⇥" — used in menus and the settings preview.

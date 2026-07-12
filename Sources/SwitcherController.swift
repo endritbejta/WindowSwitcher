@@ -6,7 +6,7 @@ import SwiftUI
 /// to selection changes and window activation.
 final class SwitcherController: HotKeyManagerDelegate {
 
-    private let mru = MRUWindowManager()
+    private let windowOrder = WindowOrderManager()
     private let hotKeys = HotKeyManager()
     private let model = SwitcherModel()
 
@@ -51,7 +51,7 @@ final class SwitcherController: HotKeyManagerDelegate {
             ? model.windows[model.selectedIndex] : nil
         close()
         if let selected {
-            mru.markUsed(selected.id)
+            windowOrder.markUsed(selected.id)
             WindowActivator.activate(selected)
         }
     }
@@ -62,17 +62,23 @@ final class SwitcherController: HotKeyManagerDelegate {
 
     // MARK: - Presentation
 
-    /// Snapshot the windows, show the overlay, and pre-select the previous
-    /// window (index 1) exactly like a single Alt+Tab tap on Windows.
+    /// Snapshot the windows, show the overlay, and pre-select the window next
+    /// to the currently-focused one — a single forward tap lands on the neighbour
+    /// after it, a reverse (Shift) tap on the one before. This is computed
+    /// relative to the focused window so it behaves correctly in both fixed and
+    /// recently-used ordering.
     private func open(reverse: Bool) {
-        let windows = mru.orderedWindows()
+        let windows = windowOrder.orderedWindows()
         guard !windows.isEmpty else { return }
 
         model.windows = windows
         model.thumbnails = [:]
-        // Index 0 is the current window; a forward tap lands on index 1, a
-        // reverse (Shift) tap wraps to the last window.
-        model.selectedIndex = reverse ? windows.count - 1 : min(1, windows.count - 1)
+
+        let count = windows.count
+        // Position of the currently-focused window in the list (0 if unknown).
+        let currentIndex = windows.firstIndex { $0.id == windowOrder.frontWindowID } ?? 0
+        let delta = reverse ? -1 : 1
+        model.selectedIndex = ((currentIndex + delta) % count + count) % count
 
         if panel == nil {
             let hosting = NSHostingView(rootView: SwitcherView(model: model))

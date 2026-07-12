@@ -119,8 +119,8 @@ private struct WindowCard: View {
             RoundedRectangle(cornerRadius: 14, style: .continuous)
                 .fill(isSelected ? Color.accentColor.opacity(0.15) : Color.clear)
         )
-        .scaleEffect(isSelected ? 1.0 : 0.97)
-        .animation(.easeOut(duration: 0.12), value: isSelected)
+        // No scale/animation: selection and any reordering are instant, so
+        // nothing slides around between switches.
     }
 
     @ViewBuilder

@@ -6,7 +6,7 @@ final class SettingsWindowController: NSWindowController {
 
     init() {
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 440, height: 340),
+            contentRect: NSRect(x: 0, y: 0, width: 440, height: 390),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
@@ -52,6 +52,11 @@ private struct SettingsView: View {
             }
             .pickerStyle(.menu)
 
+            Picker("Window order", selection: $settings.windowOrder) {
+                ForEach(WindowOrder.allCases) { Text($0.display).tag($0) }
+            }
+            .pickerStyle(.menu)
+
             // Live preview of the resulting gesture.
             HStack(spacing: 8) {
                 Text("Current shortcut:")
@@ -82,6 +87,6 @@ private struct SettingsView: View {
             Spacer()
         }
         .padding(28)
-        .frame(width: 440, height: 340, alignment: .topLeading)
+        .frame(width: 440, height: 390, alignment: .topLeading)
     }
 }
