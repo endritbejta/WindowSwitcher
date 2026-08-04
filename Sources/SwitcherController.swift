@@ -13,6 +13,14 @@ final class SwitcherController: HotKeyManagerDelegate {
     private var panel: SwitcherPanel?
     private var isVisible = false
 
+    /// Thumbnails from previous gestures, keyed by window id. Unlike
+    /// `model.thumbnails` (which is wiped and rebuilt on every `open()`), this
+    /// persists across opens so that flipping back to a window you looked at
+    /// moments ago shows its last-known preview immediately instead of the
+    /// icon placeholder while a fresh capture is in flight. Pruned to the
+    /// windows that still exist each time, so it can't grow unbounded.
+    private var thumbnailCache: [CGWindowID: NSImage] = [:]
+
     init() {
         hotKeys.delegate = self
         // Commit when a card is clicked with the mouse.
@@ -72,7 +80,16 @@ final class SwitcherController: HotKeyManagerDelegate {
         guard !windows.isEmpty else { return }
 
         model.windows = windows
-        model.thumbnails = [:]
+
+        // Drop cached previews for windows that no longer exist, then seed
+        // the model from what's left — instant redisplay for anything we've
+        // already captured, icon placeholder only for windows we've never
+        // seen before. The capture kicked off below refreshes every entry
+        // regardless, so a stale cached preview only lives on screen for the
+        // moment it takes the fresh one to land.
+        let liveIDs = Set(windows.map(\.id))
+        thumbnailCache = thumbnailCache.filter { liveIDs.contains($0.key) }
+        model.thumbnails = thumbnailCache
 
         let count = windows.count
         // Position of the currently-focused window in the list (0 if unknown).
@@ -109,9 +126,9 @@ final class SwitcherController: HotKeyManagerDelegate {
     /// the main actor as they arrive so the grid fills in progressively.
     private func captureThumbnails(for windows: [WindowInfo]) {
         ThumbnailProvider.captureThumbnails(for: windows.map(\.id)) { [weak self] id, image in
-            // Ignore late results from a previous, already-dismissed gesture.
-            guard self?.isVisible == true else { return }
-            self?.model.thumbnails[id] = image
+            guard let self, self.isVisible else { return }
+            self.model.thumbnails[id] = image
+            self.thumbnailCache[id] = image
         }
     }
 
