@@ -3,10 +3,10 @@
 A lightweight macOS utility that replaces the app-only Command+Tab with a
 **Windows-style Alt+Tab** that cycles through **individual windows**.
 
-Hold **Option**, press **Tab** to step forward (**Shift+Tab** to step back),
-release **Option** to focus the selected window. Each window — including
-multiple windows of the same app — is its own entry, shown with a live
-thumbnail, the app icon, and the window title.
+Hold **Command**, press **Tab** to step forward (**Shift+Tab** to step back),
+release **Command** to focus the selected window (Option and Control are also
+available in Settings). Each window — including multiple windows of the same
+app — is its own entry, shown with a live thumbnail and the app icon.
 
 ## Features
 
@@ -15,9 +15,10 @@ thumbnail, the app icon, and the window title.
   just like Windows Alt+Tab (recently-used order by default; a *Fixed* mode that
   keeps tiles in place is available in Settings).
 - **Hold-and-release gesture** — cycle while the modifier is down, commit on release.
-- **Rebindable shortcut** (Option / Command / Control × Tab / Backtick) via a
-  native Settings window.
-- **Live thumbnails** via ScreenCaptureKit, with app icon + title, and a
+- **Rebindable shortcut** (Command / Option / Control × Tab / Backtick) via a
+  native Settings window — Command+Tab by default, replacing the system's own
+  app switcher while the tap is active.
+- **Live thumbnails** via ScreenCaptureKit, with the app icon and a subtle
   highlighted selection.
 - **Native SwiftUI overlay** with system materials — automatic Light/Dark mode.
 - **Low overhead** — nothing runs while idle; windows and previews are captured
@@ -56,7 +57,7 @@ Screen Recording grants **persist across rebuilds**. See
 On first launch a setup window guides you through two required permissions and
 polls until both are granted:
 
-- **Accessibility** — read the Option+Tab shortcut (via a `CGEvent` tap) and
+- **Accessibility** — read the switch shortcut (via a `CGEvent` tap) and
   raise/focus the chosen window (via the Accessibility API).
 - **Screen Recording** — capture window thumbnails and read window titles.
 
@@ -94,7 +95,7 @@ to take effect — the setup window's **Restart App** button does exactly that.
 |---|---|---|
 | Discover all real windows | `CGWindowListCopyWindowInfo`, filtered to layer‑0, visible, non‑system windows | `WindowEnumerator.swift` |
 | Window ordering | Fixed (stable positions) or recently‑used; own list seeded from z‑order | `WindowOrderManager.swift` |
-| Global Option+Tab, and detecting Option **release** | `CGEvent` tap on keyDown + flagsChanged | `HotKeyManager.swift` |
+| Global shortcut, and detecting modifier **release** | `CGEvent` tap on keyDown + flagsChanged | `HotKeyManager.swift` |
 | Focus one specific window | Accessibility API + `_AXUIElementGetWindow` to match by CGWindowID | `WindowActivator.swift` |
 | Live previews | On‑demand ScreenCaptureKit stills rendered at preview size, off the main thread | `ThumbnailProvider.swift` |
 | Overlay UI | SwiftUI grid in a non‑activating `NSPanel`, system materials for Light/Dark | `SwitcherView.swift`, `SwitcherPanel.swift` |
@@ -106,9 +107,9 @@ to take effect — the setup window's **Restart App** button does exactly that.
 ### Design notes
 
 - **Why an event tap** rather than a Carbon hot-key: only the raw event stream
-  tells us when Option is *released*, which is how the Windows gesture commits.
+  tells us when the modifier is *released*, which is how the Windows gesture commits.
 - **Why a non-activating panel**: showing the overlay must not steal focus from
-  the app you're holding Option over, or releasing Option couldn't end the
+  the app you're holding the modifier over, or releasing it couldn't end the
   gesture cleanly.
 - **Why `_AXUIElementGetWindow`**: macOS has no public "focus this CGWindowID"
   call. This private-but-stable helper maps an Accessibility element to its
@@ -120,7 +121,7 @@ to take effect — the setup window's **Restart App** button does exactly that.
 
 Open **Settings…** from the menu-bar item (or ⌘,):
 
-- **Modifier** — Option, Command, or Control.
+- **Modifier** — Command (default), Option, or Control.
 - **Trigger key** — Tab or Backtick (`` ` ``).
 - **Window order** — *Recently used* (default; last-used window first, so a quick
   tap toggles between your two most recent windows) or *Fixed* (tiles never move).

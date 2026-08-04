@@ -42,9 +42,20 @@ openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
     -keyout "$WORK/key.pem" -out "$WORK/cert.pem" \
     -config "$WORK/openssl.cnf" >/dev/null 2>&1
 
-# -legacy is required: OpenSSL 3's default PKCS#12 cipher can't be imported by
-# macOS's Security framework.
-openssl pkcs12 -export -legacy -inkey "$WORK/key.pem" -in "$WORK/cert.pem" \
+# OpenSSL 3's default PKCS#12 cipher can't be imported by macOS's Security
+# framework, so it needs -legacy to opt back into the old RC2-40/3DES scheme.
+# The LibreSSL that ships as /usr/bin/openssl on macOS has no -legacy flag at
+# all (and doesn't need one — its default is already that legacy scheme), so
+# only pass the flag when the active `openssl` actually understands it.
+PKCS12_LEGACY_FLAG=""
+if openssl pkcs12 -help 2>&1 | grep -q -- -legacy; then
+    PKCS12_LEGACY_FLAG="-legacy"
+fi
+# Deliberately unquoted: it's either empty or the single static token
+# "-legacy", never a value that needs word-splitting protection — and macOS's
+# stock bash 3.2 treats a referenced-but-empty array as an unbound variable
+# under `set -u`, so an array isn't a safe alternative here.
+openssl pkcs12 -export $PKCS12_LEGACY_FLAG -inkey "$WORK/key.pem" -in "$WORK/cert.pem" \
     -out "$WORK/identity.p12" -passout pass:winswitch -name "$CERT_CN" >/dev/null 2>&1
 
 echo "==> Creating dedicated signing keychain"
@@ -61,14 +72,29 @@ security import "$WORK/identity.p12" -k "$KEYCHAIN" -P winswitch \
 security set-key-partition-list -S apple-tool:,apple: -s -k "$KC_PASS" "$KEYCHAIN" >/dev/null 2>&1
 
 # Add the keychain to the user search list so codesign can find the identity.
-EXISTING=$(security list-keychains -d user | sed -e 's/"//g' -e 's/^[[:space:]]*//')
-if ! echo "$EXISTING" | grep -q "$KEYCHAIN_NAME"; then
-    # shellcheck disable=SC2086
-    security list-keychains -d user -s $EXISTING "$KEYCHAIN"
+# Read as an array (one path per element) rather than word-splitting an
+# unquoted variable — the latter silently mangles any path containing a
+# space (e.g. a macOS username with a space in it), collapsing entries
+# together and dropping keychains (including the login keychain) from the
+# search list.
+EXISTING=()
+while IFS= read -r line; do
+    line="${line#"${line%%[![:space:]]*}"}"   # trim leading whitespace
+    line="${line%\"}"; line="${line#\"}"       # strip surrounding quotes
+    [ -n "$line" ] && EXISTING+=("$line")
+done < <(security list-keychains -d user)
+
+if [[ ! " ${EXISTING[*]} " == *"$KEYCHAIN_NAME"* ]]; then
+    security list-keychains -d user -s "${EXISTING[@]}" "$KEYCHAIN"
 fi
 
 echo "==> Done. Available code-signing identity:"
-security find-identity -v -p codesigning | grep "$CERT_CN" || {
+# Deliberately NOT `-v`: that flag restricts the list to identities System
+# Trust considers valid, and a self-signed cert never is (CSSMERR_TP_NOT_TRUSTED)
+# — expected, since nothing issued it. `codesign` doesn't require system trust
+# to sign with an identity, only that it exist with its private key, which the
+# plain (non -v) listing confirms.
+security find-identity -p codesigning | grep "$CERT_CN" || {
     echo "!! Identity not found — signing setup failed." >&2
     exit 1
 }

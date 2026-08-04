@@ -26,6 +26,30 @@ enum WindowActivator {
         return unsafeBitCast(sym, to: GetWindowFn.self)
     }()
 
+    /// The CGWindowID of `pid`'s currently-focused window, via the
+    /// Accessibility API's `kAXFocusedWindowAttribute`.
+    ///
+    /// This is used instead of reading window z-order right after an
+    /// activation notification: `CGWindowListCopyWindowInfo` can lag a beat
+    /// behind the window server actually reordering, so for an app with
+    /// several windows "the frontmost one in the CG list" was occasionally the
+    /// wrong window — the MRU list would then promote a window the user hadn't
+    /// actually touched. Asking the app directly is race-free.
+    static func focusedWindowID(forPID pid: pid_t) -> CGWindowID? {
+        guard let getWindowID else { return nil }
+        let appElement = AXUIElementCreateApplication(pid)
+        var value: CFTypeRef?
+        guard
+            AXUIElementCopyAttributeValue(appElement, kAXFocusedWindowAttribute as CFString, &value) == .success,
+            let value
+        else { return nil }
+        let axWindow = value as! AXUIElement
+
+        var wid: CGWindowID = 0
+        guard getWindowID(axWindow, &wid) == .success else { return nil }
+        return wid
+    }
+
     /// Focus the given window. Safe to call from the main thread.
     static func activate(_ window: WindowInfo) {
         let appElement = AXUIElementCreateApplication(window.pid)

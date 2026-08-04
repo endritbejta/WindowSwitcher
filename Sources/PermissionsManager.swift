@@ -1,5 +1,8 @@
 import AppKit
 import CoreGraphics
+import os
+
+private let log = Logger(subsystem: "com.example.windowswitcher", category: "permissions")
 
 /// Checks and requests the two macOS privacy permissions this app needs, and
 /// deep-links the user to the right System Settings pane for each.
@@ -11,10 +14,14 @@ import CoreGraphics
 enum PermissionsManager {
 
     /// True when the app is a trusted Accessibility client. Pass `prompt: true`
-    /// to also show the system's "grant access" dialog.
+    /// to also show the system's "grant access" dialog — this is also what
+    /// gets the app **listed** in Privacy & Security → Accessibility in the
+    /// first place; a silent, non-prompting check does not.
     static func hasAccessibility(prompt: Bool = false) -> Bool {
         let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: prompt] as CFDictionary
-        return AXIsProcessTrustedWithOptions(options)
+        let trusted = AXIsProcessTrustedWithOptions(options)
+        log.notice("hasAccessibility(prompt: \(prompt)) -> \(trusted)")
+        return trusted
     }
 
     /// True when Screen Recording is granted. `CGPreflight...` only checks;
