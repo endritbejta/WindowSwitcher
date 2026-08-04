@@ -10,30 +10,35 @@ final class SwitcherModel: ObservableObject {
     @Published var thumbnails: [CGWindowID: NSImage] = [:]
 }
 
-/// The Windows-style switcher overlay: a translucent rounded panel containing a
-/// centered, wrapping grid of window cards. Adapts to Light/Dark automatically
-/// via system materials.
+/// The switcher overlay: a translucent rounded panel containing a centered,
+/// wrapping grid of window cards, styled to sit naturally on macOS — the same
+/// kind of frosted panel as Control Center or Notification Center. Adapts to
+/// Light/Dark automatically via system materials.
 struct SwitcherView: View {
     @ObservedObject var model: SwitcherModel
 
-    private let cardWidth: CGFloat = 200
-    private let cardSpacing: CGFloat = 16
+    private let cardWidth: CGFloat = 168
+    private let cardHeight: CGFloat = 104
+    private let cardSpacing: CGFloat = 14
 
     var body: some View {
         VStack(spacing: 14) {
             grid
-            selectedTitle
+            selectedLabel
         }
-        .padding(24)
+        .padding(20)
         .background(
-            RoundedRectangle(cornerRadius: 24, style: .continuous)
-                .fill(.ultraThinMaterial)
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .fill(.thickMaterial)
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 24, style: .continuous)
-                .strokeBorder(Color.primary.opacity(0.08), lineWidth: 1)
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .strokeBorder(Color.primary.opacity(0.06), lineWidth: 1)
         )
         .fixedSize()
+        // Selection changes should snap instantly, never animate — cycling
+        // through windows needs to feel immediate, not like it's catching up.
+        .transaction { $0.animation = nil }
     }
 
     /// A centered flow of up to N cards per row. We compute a column count that
@@ -46,7 +51,9 @@ struct SwitcherView: View {
                 WindowCard(
                     window: window,
                     thumbnail: model.thumbnails[window.id],
-                    isSelected: index == model.selectedIndex
+                    isSelected: index == model.selectedIndex,
+                    width: cardWidth,
+                    height: cardHeight
                 )
                 // Clicking a card selects and commits it immediately.
                 .onTapGesture { NotificationCenter.default.post(name: .switcherCardClicked, object: index) }
@@ -54,22 +61,20 @@ struct SwitcherView: View {
         }
     }
 
-    private var selectedTitle: some View {
+    /// A single, small readout for the selected window's name — the same idea
+    /// as the label under the system's own Command+Tab switcher, kept subtle
+    /// since the app icon on the card already identifies each entry.
+    private var selectedLabel: some View {
         Group {
             if model.windows.indices.contains(model.selectedIndex) {
-                let w = model.windows[model.selectedIndex]
-                HStack(spacing: 8) {
-                    if let icon = w.appIcon {
-                        Image(nsImage: icon).resizable().frame(width: 18, height: 18)
-                    }
-                    Text(w.displayTitle)
-                        .font(.system(size: 14, weight: .medium))
-                        .lineLimit(1)
-                }
-                .foregroundStyle(.primary)
+                Text(model.windows[model.selectedIndex].displayTitle)
+                    .font(.system(size: 13, weight: .medium))
+                    .lineLimit(1)
+                    .foregroundStyle(.secondary)
             }
         }
         .frame(maxWidth: CGFloat(columnCount(for: model.windows.count)) * (cardWidth + cardSpacing))
+        .frame(height: 16)
     }
 
     /// Keep rows to at most 6 cards; grow rows before growing width.
@@ -78,49 +83,44 @@ struct SwitcherView: View {
     }
 }
 
-/// A single window tile: thumbnail with the app icon badged in the corner, the
-/// window title beneath, and a highlight ring when selected.
+/// A single window tile: thumbnail with the app icon badged in the corner, and
+/// a soft highlight when selected. No per-card title — the shared label below
+/// the grid covers that, keeping each tile clean.
 private struct WindowCard: View {
     let window: WindowInfo
     let thumbnail: NSImage?
     let isSelected: Bool
+    let width: CGFloat
+    let height: CGFloat
 
     var body: some View {
-        VStack(spacing: 8) {
-            ZStack(alignment: .bottomTrailing) {
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .fill(Color.primary.opacity(0.06))
-                    .frame(width: 180, height: 120)
-                    .overlay(previewImage)
-                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        ZStack(alignment: .bottomTrailing) {
+            RoundedRectangle(cornerRadius: 11, style: .continuous)
+                .fill(.regularMaterial)
+                .overlay(previewImage)
+                .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
 
-                if let icon = window.appIcon {
-                    Image(nsImage: icon)
-                        .resizable()
-                        .frame(width: 34, height: 34)
-                        .shadow(radius: 2)
-                        .offset(x: 6, y: 6)
-                }
+            if let icon = window.appIcon {
+                Image(nsImage: icon)
+                    .resizable()
+                    .frame(width: 26, height: 26)
+                    .shadow(color: .black.opacity(0.25), radius: 2, y: 1)
+                    .padding(6)
             }
-            .overlay(
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .strokeBorder(isSelected ? Color.accentColor : Color.clear, lineWidth: 3)
-            )
-
-            Text(window.displayTitle)
-                .font(.system(size: 11))
-                .lineLimit(1)
-                .truncationMode(.tail)
-                .frame(width: 180)
-                .foregroundStyle(isSelected ? .primary : .secondary)
         }
-        .padding(6)
-        .background(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(isSelected ? Color.accentColor.opacity(0.15) : Color.clear)
+        .frame(width: width, height: height)
+        .overlay(
+            RoundedRectangle(cornerRadius: 11, style: .continuous)
+                .strokeBorder(Color.accentColor, lineWidth: 2)
+                .opacity(isSelected ? 1 : 0)
         )
-        // No scale/animation: selection and any reordering are instant, so
-        // nothing slides around between switches.
+        .scaleEffect(isSelected ? 1.035 : 1)
+        // Deliberately no `.animation()` here: with recently-used ordering,
+        // switching can move a card to a different grid slot in the same
+        // update that changes its selection state. An animation tied to
+        // `isSelected` on this view doesn't stay scoped to just scale/opacity
+        // — it picks up that position change too, so the card visibly slides
+        // to its new slot instead of the selection just snapping instantly.
     }
 
     @ViewBuilder
@@ -134,7 +134,7 @@ private struct WindowCard: View {
             Image(nsImage: icon)
                 .resizable()
                 .aspectRatio(contentMode: .fit)
-                .frame(width: 56, height: 56)
+                .frame(width: 44, height: 44)
                 .opacity(0.5)
         }
     }

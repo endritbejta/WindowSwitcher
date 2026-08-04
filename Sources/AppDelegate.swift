@@ -26,6 +26,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // path to grant it.
         if PermissionsManager.hasAccessibility() {
             startSwitcher()
+        } else {
+            // `prompt: true` is what actually gets the app *listed* in
+            // Privacy & Security → Accessibility and shows the system's own
+            // "would like to control this computer" alert — a silent check
+            // (prompt: false) never registers the app there at all, so
+            // without this call there could be nothing for the user to
+            // toggle on no matter how many times they open Settings.
+            _ = PermissionsManager.hasAccessibility(prompt: true)
         }
         if !PermissionsManager.allGranted {
             showOnboarding()

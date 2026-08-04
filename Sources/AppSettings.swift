@@ -115,7 +115,11 @@ final class AppSettings: ObservableObject {
     }
 
     private init() {
-        modifier = SwitchModifier(rawValue: defaults.string(forKey: Keys.modifier) ?? "") ?? .option
+        // Default to Command+Tab: it's the muscle-memory macOS users already
+        // have, and the tap swallows the event so this app's per-window list
+        // replaces the system's per-app switcher outright. Option/Control stay
+        // available in Settings for anyone who wants to keep both.
+        modifier = SwitchModifier(rawValue: defaults.string(forKey: Keys.modifier) ?? "") ?? .command
         triggerKey = TriggerKey(rawValue: defaults.string(forKey: Keys.triggerKey) ?? "") ?? .tab
         // Default to recently-used so a single tap flips between your two most
         // recent windows (the core Windows Alt+Tab behavior). Fixed order stays

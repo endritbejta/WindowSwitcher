@@ -20,9 +20,9 @@ protocol HotKeyManagerDelegate: AnyObject {
 /// flagsChanged stream, so we can both intercept Tab and notice the moment
 /// Option lets go.
 ///
-/// The trigger is Option+Tab by design: it avoids clashing with the system's
-/// Command+Tab app switcher. The modifier and key are declared as constants
-/// here so they are easy to change.
+/// The modifier and trigger key are configurable in Settings (default
+/// Command+Tab); whichever is chosen, this tap swallows the key so it fully
+/// replaces whatever system behavior is normally bound to it.
 final class HotKeyManager {
 
     weak var delegate: HotKeyManagerDelegate?

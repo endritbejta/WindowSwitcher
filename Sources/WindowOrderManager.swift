@@ -76,15 +76,18 @@ final class WindowOrderManager {
         order.insert(id, at: 0)
     }
 
-    /// External app activation bumps that app's frontmost window — recently-used
-    /// mode only.
+    /// External app activation bumps that app's focused window — recently-used
+    /// mode only. Uses Accessibility's focused-window attribute rather than
+    /// CG window-list z-order, which can still reflect the *previous* order for
+    /// a moment after activation and would otherwise promote the wrong window
+    /// of a multi-window app.
     @objc private func appDidActivate(_ note: Notification) {
         guard AppSettings.shared.windowOrder == .recentlyUsed else { return }
         guard
             let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
         else { return }
-        if let front = WindowEnumerator.currentWindows().first(where: { $0.pid == app.processIdentifier }) {
-            markUsed(front.id)
+        if let id = WindowActivator.focusedWindowID(forPID: app.processIdentifier) {
+            markUsed(id)
         }
     }
 }
