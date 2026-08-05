@@ -82,8 +82,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func setupStatusItem() {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = item.button {
-            button.image = NSImage(systemSymbolName: "rectangle.stack",
-                                   accessibilityDescription: "Window Switcher")
+            button.image = AppIcon.makeStatusItemImage()
         }
         statusItem = item
         updateStatusMenu(running: false)
