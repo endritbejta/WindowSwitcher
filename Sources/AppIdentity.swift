@@ -134,21 +134,30 @@ enum AppIdentity {
         UserDefaults.standard.string(forKey: storedRequirementKey)
     }
 
+    private static var identityChangedAtLaunch = false
+
     /// True when the code identity changed since the last launch — meaning any
     /// permission macOS has on file was granted to the *previous* identity and
     /// is now dead. This is the one case where "just grant it again" does not
     /// work: the stale entry has to be cleared first.
-    static var identityChangedSinceLastLaunch: Bool {
-        guard let previous = previousDesignatedRequirement,
-              let current = designatedRequirement else { return false }
-        return previous != current
-    }
+    ///
+    /// Snapshotted by `beginSession()` rather than computed on demand, because
+    /// the stored value is overwritten during launch.
+    static var identityChangedSinceLastLaunch: Bool { identityChangedAtLaunch }
 
-    /// Record the current identity as the known-good one. Called once the app
-    /// is actually running with the permissions it needs, so that a later
-    /// change is detectable.
-    static func rememberCurrentIdentity() {
+    /// Compare this launch's identity against the last one, then record the
+    /// current one. Call once, early in launch.
+    ///
+    /// This deliberately records on *every* launch rather than only when the app
+    /// manages to run. Recording only on success meant that on a Mac where the
+    /// app had never worked there was nothing to compare against, so a changed
+    /// identity — the very thing that keeps it from working — went undetected
+    /// and the user was told to toggle a switch that could not help them.
+    static func beginSession() {
         guard let current = designatedRequirement else { return }
+        if let previous = previousDesignatedRequirement {
+            identityChangedAtLaunch = previous != current
+        }
         UserDefaults.standard.set(current, forKey: storedRequirementKey)
     }
 

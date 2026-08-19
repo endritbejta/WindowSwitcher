@@ -22,6 +22,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // permission stops being recognised, this line in Console is the
         // difference between diagnosing it and guessing.
         AppIdentity.logState()
+        // Compare this launch's code identity against the previous one before
+        // anything else reads it — a change means macOS's existing grant belongs
+        // to an identity that no longer exists.
+        AppIdentity.beginSession()
 
         // Rebuild the menu labels whenever the shortcut changes.
         AppSettings.shared.onChange = { [weak self] in
@@ -74,11 +78,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard switcher.start() else { return false }
         isRunning = true
         updateStatusMenu(running: true)
-        // Now that the app is genuinely working with this code identity, record
-        // it. A later change means the grant macOS holds no longer applies, and
-        // `PermissionSetup` uses that to offer the reset instead of telling the
-        // user to flip a toggle that cannot help.
-        AppIdentity.rememberCurrentIdentity()
         return true
     }
 
@@ -153,6 +152,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             menu.addItem(NSMenuItem(title: "Grant Permissions…",
                                     action: #selector(openOnboarding),
                                     keyEquivalent: ""))
+            // The escape hatch for "the toggle is on but the app disagrees".
+            // Reachable here as well as in the setup window, because a user who
+            // granted the permission in System Settings has no reason to think
+            // the answer lives behind a setup screen.
+            menu.addItem(NSMenuItem(title: "Reset Permissions & Restart",
+                                    action: #selector(resetPermissions),
+                                    keyEquivalent: ""))
         }
         menu.addItem(NSMenuItem(title: "Settings…",
                                 action: #selector(openSettings),
@@ -167,6 +173,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: Actions
 
     @objc private func openOnboarding() { showOnboarding() }
+
+    @objc private func resetPermissions() {
+        PermissionSetup.resetGrantsAndRelaunch { [weak self] result in
+            DispatchQueue.main.async {
+                // A failed reset falls back to the setup window, which explains
+                // the manual route (remove the entry with "–", then re-add).
+                if case .failed = result { self?.showOnboarding() }
+            }
+        }
+    }
 
     @objc private func openSettings() {
         if settingsWindow == nil { settingsWindow = SettingsWindowController() }

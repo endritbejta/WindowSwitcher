@@ -43,33 +43,9 @@ enum PermissionsManager {
         hasAccessibility() && hasScreenRecording()
     }
 
-    // MARK: "I granted it and nothing happened" detection
-
-    /// When the user was last sent to the Accessibility pane.
-    private static var settingsOpenedAt: Date?
-
-    /// How long the user is given to flip the toggle before we conclude that
-    /// flipping it is not going to help.
-    private static let stuckThreshold: TimeInterval = 12
-
-    /// True when the user has visited the Accessibility pane and we are *still*
-    /// not trusted a while later. At that point the problem is not that they
-    /// haven't granted it — it's that the grant cannot apply to this copy, so
-    /// the repair actions need to be offered rather than more instructions.
-    ///
-    /// This is deliberately a time-based heuristic and not the only route to the
-    /// repair: `AppIdentity.identityChangedSinceLastLaunch` catches the same
-    /// condition up front when it can be proven, and the reset action stays
-    /// reachable regardless.
-    static var looksStuck: Bool {
-        guard let opened = settingsOpenedAt else { return false }
-        return Date().timeIntervalSince(opened) > stuckThreshold && !hasAccessibility()
-    }
-
     // MARK: Deep links into System Settings
 
     static func openAccessibilitySettings() {
-        settingsOpenedAt = Date()
         open("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
     }
 
