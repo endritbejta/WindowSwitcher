@@ -1,12 +1,18 @@
 import AppKit
 
-/// The Window Switcher menu-bar logo.
+/// The Window Switcher logo, used both for the menu-bar item and for the app
+/// icon that Finder, the Dock and Spotlight show.
 ///
 /// Design: a rounded "squircle" tile — standing in for a window — filled
 /// with a solid purple gradient (a slight fade, not a wide sweep), with two
 /// separate white arcs drawn on top rather than one closed ring (each with
 /// its own arrowhead) — reads as two things swapping places, not a single
 /// refresh loop.
+///
+/// The artwork is authored once on a 24x24 unit grid and rendered at whatever
+/// size is asked for. The two entry points differ only in framing: the menu-bar
+/// glyph fills its rect edge to edge, while the app icon insets the tile and
+/// uses Apple's corner radius so it sits correctly beside other app icons.
 enum AppIcon {
 
     /// Builds the status-item image. Resolution independent — draws fresh
@@ -25,10 +31,40 @@ enum AppIcon {
         return image
     }
 
-    /// Draws the logo into `rect` of `ctx`. Authored on a 24x24 unit grid
-    /// and scaled to fit, so it can be rendered at any size.
+    /// Proportion of an app-icon canvas the tile itself occupies. macOS app
+    /// icons are drawn inset rather than edge to edge (Apple's own grid puts the
+    /// 1024pt canvas's artwork at 824pt), so an edge-to-edge tile would look
+    /// oversized next to every other icon in the Dock and in Spotlight.
+    private static let appIconArtworkFraction: CGFloat = 824.0 / 1024.0
+
+    /// Corner radius of the tile as a fraction of its width. Edge-to-edge in the
+    /// menu bar the logo reads better slightly rounder; as an app icon it should
+    /// match the system's radius.
+    private static let menuBarCornerFraction: CGFloat = 7.0 / 24.0
+    private static let appIconCornerFraction: CGFloat = 0.2237
+
+    /// Draws the logo into `rect` of `ctx`, filling it edge to edge. Authored on
+    /// a 24x24 unit grid and scaled to fit, so it can be rendered at any size.
     static func draw(in ctx: CGContext, rect: CGRect) {
+        drawArtwork(in: ctx, rect: rect, cornerFraction: menuBarCornerFraction)
+    }
+
+    /// Draws the app-icon rendering into `rect`: the same tile, inset within the
+    /// canvas and with the system corner radius.
+    static func drawAppIcon(in ctx: CGContext, rect: CGRect) {
+        let side = min(rect.width, rect.height) * appIconArtworkFraction
+        let artwork = CGRect(
+            x: rect.midX - side / 2,
+            y: rect.midY - side / 2,
+            width: side,
+            height: side
+        )
+        drawArtwork(in: ctx, rect: artwork, cornerFraction: appIconCornerFraction)
+    }
+
+    private static func drawArtwork(in ctx: CGContext, rect: CGRect, cornerFraction: CGFloat) {
         let scale = rect.width / 24.0
+        let corner = 24.0 * cornerFraction
 
         ctx.saveGState()
         ctx.translateBy(x: rect.minX, y: rect.minY)
@@ -37,7 +73,7 @@ enum AppIcon {
         // 1) Squircle badge: the two solid, saturated purples with a slight
         // fade between them, rather than a wide light-to-dark sweep.
         let badgeRect = CGRect(x: 0, y: 0, width: 24, height: 24)
-        let badgePath = CGPath(roundedRect: badgeRect, cornerWidth: 7, cornerHeight: 7, transform: nil)
+        let badgePath = CGPath(roundedRect: badgeRect, cornerWidth: corner, cornerHeight: corner, transform: nil)
         ctx.addPath(badgePath)
         ctx.clip()
 
