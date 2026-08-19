@@ -69,10 +69,6 @@ final class OnboardingWindowController: NSWindowController, NSWindowDelegate {
         model.hasScreenRecording = PermissionsManager.hasScreenRecording()
         model.blockers = PermissionSetup.blockers()
         model.identitySummary = AppIdentity.signing.shortDescription
-        // Surface the manual reset once the user has clearly tried the toggle
-        // and it made no difference.
-        model.showResetEscapeHatch = PermissionsManager.looksStuck
-            || model.blockers.contains(.staleGrant)
 
         // Keep trying until the tap is actually installed, not just until the
         // permission reads as granted.
@@ -94,8 +90,6 @@ final class PermissionsViewModel: ObservableObject {
     @Published var switcherActive = false
     /// Reasons a grant cannot stick, worst first.
     @Published var blockers: [PermissionSetup.Blocker] = []
-    /// Offer the "reset the permission" repair even when no blocker was proven.
-    @Published var showResetEscapeHatch = false
     /// Human-readable signing state, shown in the diagnostics footer.
     @Published var identitySummary = ""
     /// Message from a repair that could not complete on its own.
@@ -140,7 +134,14 @@ private struct PermissionsView: View {
                     }
                 )
 
-                if model.showResetEscapeHatch && !model.hasAccessibility {
+                // Offered whenever Accessibility is missing, with no cleverness
+                // about whether we can *prove* a stale entry exists. An older
+                // install of the app leaves an entry bound to its old code
+                // identity, and on a Mac where this copy has never worked there
+                // is nothing recorded to compare against — so gating the repair
+                // on proof hid it in exactly the case that needs it. Resetting a
+                // grant that was never there costs nothing.
+                if !model.hasAccessibility {
                     resetEscapeHatch
                 }
 
@@ -205,9 +206,10 @@ private struct PermissionsView: View {
             Text("Turned it on and nothing happened?")
                 .font(.system(size: 14, weight: .medium))
             Text("""
-                macOS is probably holding an entry for an older copy of the app. This clears \
-                Window Switcher's permission entries and restarts it, so you can grant it once \
-                more from a clean slate.
+                If an older version of Window Switcher was ever installed, macOS is still holding \
+                that copy's permission entry — the switch reads as on but applies to the old app, \
+                so this one is never trusted. This removes those entries and restarts, letting you \
+                grant it once more from a clean slate.
                 """)
                 .font(.system(size: 12))
                 .foregroundStyle(.secondary)
