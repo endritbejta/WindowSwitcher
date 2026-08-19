@@ -12,21 +12,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var onboarding: OnboardingWindowController?
     private var settingsWindow: SettingsWindowController?
     private var isRunning = false
+    /// Retries tap installation after the app launches without permission but
+    /// gains it later (granted in System Settings while we sit in the menu bar
+    /// with the setup window closed).
+    private var permissionWatchdog: Timer?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Record how this copy is signed and where it is running from. When a
+        // permission stops being recognised, this line in Console is the
+        // difference between diagnosing it and guessing.
+        AppIdentity.logState()
+
         // Rebuild the menu labels whenever the shortcut changes.
         AppSettings.shared.onChange = { [weak self] in
             self?.updateStatusMenu(running: self?.isRunning ?? false)
         }
         setupStatusItem()
 
+        // A translocated copy is running from a disposable path, so no grant
+        // given now can survive. Go straight to setup, which offers the move to
+        // /Applications that fixes it — asking for permission first would just
+        // waste the user's time.
+        let fatalBlocker = PermissionSetup.blockers().contains { $0.isFatal }
+
         // Only Accessibility is required to run; Screen Recording is optional
         // (previews fall back to app icons without it). Start whenever we can,
         // and still surface onboarding if anything is missing so the user has a
         // path to grant it.
-        if PermissionsManager.hasAccessibility() {
+        if !fatalBlocker && PermissionsManager.hasAccessibility() {
             startSwitcher()
-        } else {
+        } else if !fatalBlocker {
             // `prompt: true` is what actually gets the app *listed* in
             // Privacy & Security → Accessibility and shows the system's own
             // "would like to control this computer" alert — a silent check
@@ -35,19 +50,55 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // toggle on no matter how many times they open Settings.
             _ = PermissionsManager.hasAccessibility(prompt: true)
         }
-        if !PermissionsManager.allGranted {
+
+        // Open setup only when something actually needs the user: a blocker, or
+        // the required permission missing. Screen Recording is optional, so a
+        // switcher that is already running must not reopen this window on every
+        // launch — that nagging is what makes a working app feel broken.
+        if fatalBlocker || !isRunning {
             showOnboarding()
         }
+        startPermissionWatchdog()
     }
 
     // MARK: Setup
 
-    /// Idempotent: installs the event tap once Accessibility is granted.
-    private func startSwitcher() {
+    /// Idempotent: installs the event tap once Accessibility is granted, and
+    /// reports whether the tap is now live. Returns false while the permission
+    /// is missing or tap creation fails, so callers can retry — a grant that has
+    /// only just landed sometimes needs a moment before `CGEvent.tapCreate`
+    /// succeeds.
+    @discardableResult
+    private func startSwitcher() -> Bool {
+        guard !isRunning else { return true }
+        guard switcher.start() else { return false }
+        isRunning = true
+        updateStatusMenu(running: true)
+        // Now that the app is genuinely working with this code identity, record
+        // it. A later change means the grant macOS holds no longer applies, and
+        // `PermissionSetup` uses that to offer the reset instead of telling the
+        // user to flip a toggle that cannot help.
+        AppIdentity.rememberCurrentIdentity()
+        return true
+    }
+
+    /// Keep checking in the background so a permission granted while the setup
+    /// window is closed still brings the switcher up, without the user having to
+    /// restart the app or reopen the window.
+    private func startPermissionWatchdog() {
         guard !isRunning else { return }
-        if switcher.start() {
-            isRunning = true
-            updateStatusMenu(running: true)
+        permissionWatchdog?.invalidate()
+        permissionWatchdog = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] timer in
+            guard let self else { timer.invalidate(); return }
+            if self.isRunning {
+                timer.invalidate()
+                self.permissionWatchdog = nil
+                return
+            }
+            guard !PermissionSetup.blockers().contains(where: { $0.isFatal }) else { return }
+            if PermissionsManager.hasAccessibility() {
+                self.startSwitcher()
+            }
         }
     }
 
@@ -59,7 +110,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 onAccessibilityReady: { [weak self] in
                     // Start the switcher as soon as Accessibility lands; leave
                     // the window open so the user can still enable previews.
-                    self?.startSwitcher()
+                    // The returned flag tells the window whether the tap is
+                    // really live, so it keeps retrying if it is not.
+                    self?.startSwitcher() ?? false
                 },
                 onRestart: { [weak self] in self?.relaunch() }
             )
@@ -70,11 +123,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Relaunch the app in a fresh process. macOS applies a freshly-granted
     /// permission to the new instance; the old one exits once the new one is up.
     private func relaunch() {
-        let config = NSWorkspace.OpenConfiguration()
-        config.createsNewApplicationInstance = true
-        NSWorkspace.shared.openApplication(at: Bundle.main.bundleURL, configuration: config) { _, _ in
-            DispatchQueue.main.async { NSApp.terminate(nil) }
-        }
+        PermissionSetup.relaunch(from: Bundle.main.bundleURL)
     }
 
     // MARK: Menu bar

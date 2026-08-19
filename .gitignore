@@ -9,3 +9,11 @@ build/
 DerivedData/
 *.xcuserstate
 xcuserdata/
+
+# Local record of the last build's designated requirement, used to warn when the
+# code identity changes (which is what invalidates a permission grant). Machine-
+# specific, so it is not shared.
+.signing-identity
+
+# Exported signing identity. A private key: never commit it.
+*.p12
