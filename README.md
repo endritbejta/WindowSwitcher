@@ -16,6 +16,9 @@ shown with a live thumbnail and the app icon.
 - **Rebindable shortcut** (Command / Option / Control × Tab / Backtick) via a
   native Settings window — Command+Tab by default, replacing the system's own
   app switcher while the tap is active.
+- **Multi-display aware** — lists windows from every screen, badges each card
+  with the display it lives on, and opens the overlay on the display you're
+  working on. Optionally cycles only that display's windows.
 - **Live thumbnails** via ScreenCaptureKit, with the app icon and a subtle
   highlighted selection.
 - **Native SwiftUI overlay** with system materials — automatic Light/Dark mode.
@@ -92,6 +95,11 @@ Open **Settings…** from the menu-bar item:
 - **Trigger key** — Tab or Backtick (`` ` ``).
 - **Window order** — *Recently used* (default; last-used window first, so a quick
   tap toggles between your two most recent windows) or *Fixed* (tiles never move).
+- **Show switcher on** — which display the overlay appears on: the one with the
+  pointer (default), the one showing the focused window, or always the main
+  display.
+- **List windows from** — *All displays* (default) or only the display the
+  switcher is showing on, for people who keep one monitor per context.
 
 Changes persist and take effect on the next keystroke — the hot-key handler reads
 the binding live, so nothing needs restarting.
@@ -243,6 +251,7 @@ confirm the requirements match.
 | Focus one specific window | Accessibility API + `_AXUIElementGetWindow` to match by CGWindowID | `WindowActivator.swift` |
 | Live previews | On‑demand ScreenCaptureKit stills rendered at preview size, off the main thread | `ThumbnailProvider.swift` |
 | Overlay UI | SwiftUI grid in a non‑activating `NSPanel`, system materials for Light/Dark | `SwitcherView.swift`, `SwitcherPanel.swift` |
+| Multiple displays | Map each window to a screen by largest overlap; place and size the overlay for the target display | `DisplayLayout.swift`, `SwitcherPanel.swift` |
 | Orchestration | Wires key events → selection → activation | `SwitcherController.swift` |
 | Permissions & onboarding | Preflight/request, deep links to Settings, and repairs for a grant that cannot stick | `PermissionsManager.swift`, `AppIdentity.swift`, `PermissionSetup.swift`, `OnboardingWindow.swift` |
 | Rebindable shortcut | Persisted modifier + trigger key, read live by the tap | `AppSettings.swift`, `SettingsWindow.swift` |
@@ -260,6 +269,20 @@ confirm the requirements match.
   CGWindowID so we can raise the exact window even when several share a title.
 - **Low overhead**: nothing polls while idle. Windows are enumerated and
   thumbnails captured only for the moment the switcher is open, then released.
+- **Why displays are matched by overlap, not centre point**: a window dragged
+  across a bezel sits on two screens at once. macOS treats it as belonging to
+  whichever shows more of it, and picking by centre point would also misfile a
+  window whose middle lands in the gap between two screens of different heights.
+- **Why the two coordinate spaces are kept apart**: window geometry and the
+  Accessibility API use CoreGraphics' top-left origin, while `NSScreen` and the
+  overlay use Cocoa's bottom-left one. A monitor placed above the menu-bar
+  display gets a *negative* y in the first and a positive one in the second, so
+  mixing them puts windows on the wrong screen. `DisplayLayout` is the only
+  place that converts.
+- **Why the grid resizes itself**: the overlay is measured before it knows where
+  it will land. It is told the target display's visible area up front and tiles
+  to fit — adding columns first, then shrinking cards — so a layout that suited
+  a 27" monitor doesn't hang off the edges of a laptop screen.
 - **Why the app checks its own code signature**: a permission grant is keyed to
   the code identity, so the app can tell the difference between "you have not
   granted this yet" and "you granted it to a copy macOS no longer recognises" —
@@ -295,8 +318,9 @@ WindowSwitcher/
     ├── PermissionSetup.swift    # Diagnoses blockers; installs to /Applications, resets TCC
     ├── OnboardingWindow.swift   # First-run setup, blocker repairs, Restart App
     ├── HotKeyManager.swift      # CGEvent tap: modifier+key, and modifier-release
+    ├── DisplayLayout.swift      # Screen geometry: CG <-> Cocoa coords, window -> display
     ├── WindowEnumerator.swift   # Discover + filter real windows
-    ├── WindowInfo.swift         # Value type for one window (id, title, app, icon)
+    ├── WindowInfo.swift         # Value type for one window (id, title, app, icon, display)
     ├── WindowOrderManager.swift # Fixed or recently-used ordering
     ├── WindowActivator.swift    # Focus one window by CGWindowID (AX API)
     ├── ThumbnailProvider.swift  # ScreenCaptureKit previews

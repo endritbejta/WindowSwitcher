@@ -49,6 +49,46 @@ enum WindowOrder: String, CaseIterable, Identifiable {
     }
 }
 
+/// Which windows the switcher lists when more than one display is attached.
+enum DisplayScope: String, CaseIterable, Identifiable {
+    /// Every window on every screen, each card badged with its display number.
+    case allDisplays
+    /// Only the windows on the display the switcher is showing on, so a tap
+    /// cycles within the monitor you're working on instead of across the desk.
+    case activeDisplay
+
+    var id: String { rawValue }
+
+    var display: String {
+        switch self {
+        case .allDisplays:   return "All displays"
+        case .activeDisplay: return "Only the display the switcher is on"
+        }
+    }
+}
+
+/// Which display the switcher overlay itself appears on.
+enum OverlayDisplay: String, CaseIterable, Identifiable {
+    /// The screen the pointer is on (default) — where you were last looking.
+    case pointer
+    /// The screen showing the window that currently has keyboard focus. More
+    /// reliable than the pointer for a keyboard-driven gesture, since the
+    /// mouse is often parked on a monitor you aren't typing into.
+    case activeWindow
+    /// Always the display carrying the menu bar.
+    case main
+
+    var id: String { rawValue }
+
+    var display: String {
+        switch self {
+        case .pointer:      return "Display with the pointer"
+        case .activeWindow: return "Display with the focused window"
+        case .main:         return "Main display (with the menu bar)"
+        }
+    }
+}
+
 /// The key tapped to advance the selection.
 enum TriggerKey: String, CaseIterable, Identifiable {
     case tab, grave
@@ -88,6 +128,8 @@ final class AppSettings: ObservableObject {
         static let modifier = "switch.modifier"
         static let triggerKey = "switch.triggerKey"
         static let windowOrder = "switch.windowOrder"
+        static let displayScope = "switch.displayScope"
+        static let overlayDisplay = "switch.overlayDisplay"
     }
 
     /// Invoked after any change, so the app can refresh menu labels, etc.
@@ -114,6 +156,20 @@ final class AppSettings: ObservableObject {
         }
     }
 
+    @Published var displayScope: DisplayScope {
+        didSet {
+            defaults.set(displayScope.rawValue, forKey: Keys.displayScope)
+            onChange?()
+        }
+    }
+
+    @Published var overlayDisplay: OverlayDisplay {
+        didSet {
+            defaults.set(overlayDisplay.rawValue, forKey: Keys.overlayDisplay)
+            onChange?()
+        }
+    }
+
     private init() {
         // Default to Command+Tab: it's the muscle-memory macOS users already
         // have, and the tap swallows the event so this app's per-window list
@@ -125,6 +181,14 @@ final class AppSettings: ObservableObject {
         // recent windows (the core Windows Alt+Tab behavior). Fixed order stays
         // available in Settings.
         windowOrder = WindowOrder(rawValue: defaults.string(forKey: Keys.windowOrder) ?? "") ?? .recentlyUsed
+        // Default to listing every window across every screen: that is what a
+        // switcher is for, and hiding the other monitor's windows behind a
+        // setting would be a surprising default. Per-display scoping is there
+        // for people who keep a monitor per context.
+        displayScope = DisplayScope(rawValue: defaults.string(forKey: Keys.displayScope) ?? "") ?? .allDisplays
+        // The pointer is the cheapest signal for "the screen you're looking
+        // at", and matches what other macOS switchers do.
+        overlayDisplay = OverlayDisplay(rawValue: defaults.string(forKey: Keys.overlayDisplay) ?? "") ?? .pointer
     }
 
     /// e.g. "⌥⇥" — used in menus and the settings preview.

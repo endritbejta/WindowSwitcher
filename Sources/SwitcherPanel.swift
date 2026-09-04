@@ -33,29 +33,40 @@ final class SwitcherPanel: NSPanel {
     override var canBecomeKey: Bool { false }
     override var canBecomeMain: Bool { false }
 
-    /// Size to fit the hosted SwiftUI content and center on the screen with the
-    /// mouse (the display the user is looking at).
-    func presentCentered() {
-        layoutIfNeeded()
-        let fitting = contentView?.fittingSize ?? NSSize(width: 400, height: 200)
+    /// Gap kept between the overlay and the edges of its display, so the panel
+    /// reads as floating on that screen rather than filling it.
+    static let screenMargin: CGFloat = 24
+
+    /// Size to fit the hosted SwiftUI content and centre it on `screen`.
+    ///
+    /// The clamp matters on a mixed setup: the content is measured from the
+    /// SwiftUI view, which knows nothing about where it is going to land, so
+    /// without it a grid laid out comfortably for a 27" monitor would hang off
+    /// both edges of a laptop display. `SwitcherView` is told the same budget
+    /// and lays out inside it, so the clamp should never actually bite — it is
+    /// the backstop for the frame where it hasn't caught up yet.
+    func present(on screen: NSScreen) {
+        // NSHostingView resolves its size lazily; force the pass so the
+        // fitting size we read below reflects this gesture's layout and not
+        // the previous one's.
+        contentView?.layoutSubtreeIfNeeded()
+
+        let visible = screen.visibleFrame
+        let budget = NSSize(
+            width: max(120, visible.width - Self.screenMargin * 2),
+            height: max(120, visible.height - Self.screenMargin * 2)
+        )
+        var fitting = contentView?.fittingSize ?? NSSize(width: 400, height: 200)
+        fitting.width = min(fitting.width, budget.width)
+        fitting.height = min(fitting.height, budget.height)
+
         setContentSize(fitting)
-
-        let screen = NSScreen.screenWithMouse ?? NSScreen.main
-        if let visible = screen?.visibleFrame {
-            let origin = NSPoint(
-                x: visible.midX - fitting.width / 2,
-                y: visible.midY - fitting.height / 2
-            )
-            setFrameOrigin(origin)
-        }
+        // Placed by frame rather than `center()`, which would always use the
+        // main display and ignore `screen` entirely.
+        setFrameOrigin(NSPoint(
+            x: visible.midX - fitting.width / 2,
+            y: visible.midY - fitting.height / 2
+        ))
         orderFrontRegardless()
-    }
-}
-
-extension NSScreen {
-    /// The screen currently containing the mouse cursor.
-    static var screenWithMouse: NSScreen? {
-        let location = NSEvent.mouseLocation
-        return NSScreen.screens.first { NSMouseInRect(location, $0.frame, false) }
     }
 }
