@@ -15,6 +15,15 @@ import AppKit
 /// uses Apple's corner radius so it sits correctly beside other app icons.
 enum AppIcon {
 
+    /// The logo's purple, lifted for use as a UI tint.
+    ///
+    /// The icon's own gradient runs dark (#2F184B to #532B88) because it is
+    /// read as a filled tile at small sizes. A tint painted *onto* a window
+    /// preview has to hold its own against both a white document and a dark
+    /// editor, so this is the same hue a few steps brighter rather than either
+    /// of the gradient's colours.
+    static let brandTint = NSColor(calibratedRed: 0.502, green: 0.310, blue: 0.800, alpha: 1) // #804FCC
+
     /// Builds the status-item image. Resolution independent — draws fresh
     /// at whatever backing scale the menu bar requests (1x/2x/3x), so it
     /// stays crisp on every display.

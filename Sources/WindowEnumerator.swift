@@ -33,6 +33,11 @@ enum WindowEnumerator {
     /// Returns the current on-screen windows, front-to-back. CoreGraphics
     /// already returns them in front-to-back z-order, which is a decent proxy
     /// for recency the very first time we run, before our own MRU takes over.
+    ///
+    /// The list spans every attached display: `.optionOnScreenOnly` means
+    /// "visible right now", not "on the main screen", so windows on a second
+    /// monitor come back here too. Each one is tagged with the display it is
+    /// on so callers can group, label or filter by screen.
     static func currentWindows() -> [WindowInfo] {
         // `.optionOnScreenOnly` excludes minimised/hidden windows; a Windows
         // Alt+Tab only shows windows you can actually switch to.
@@ -48,9 +53,13 @@ enum WindowEnumerator {
             appsByPID[app.processIdentifier] = app
         }
 
+        // Snapshot the display arrangement once, rather than re-deriving it for
+        // every window in the list.
+        let displays = DisplayLayout.currentDisplays()
+
         var result: [WindowInfo] = []
         for dict in raw {
-            guard let info = makeWindowInfo(from: dict, appsByPID: appsByPID) else { continue }
+            guard let info = makeWindowInfo(from: dict, appsByPID: appsByPID, displays: displays) else { continue }
             result.append(info)
         }
         return result
@@ -60,7 +69,8 @@ enum WindowEnumerator {
     /// returns nil if it fails any of the "is this a real window" checks.
     private static func makeWindowInfo(
         from dict: [String: Any],
-        appsByPID: [pid_t: NSRunningApplication]
+        appsByPID: [pid_t: NSRunningApplication],
+        displays: [CGDirectDisplayID: DisplayRef]
     ) -> WindowInfo? {
         // Layer 0 is the normal application-window layer. Menus, the Dock, the
         // status bar, tooltips etc. all live on non-zero layers.
@@ -107,13 +117,20 @@ enum WindowEnumerator {
 
         let title = dict[kCGWindowName as String] as? String ?? ""
 
+        // `bounds` is in CoreGraphics' top-left space, which is exactly what
+        // `displayID(forCGRect:)` expects — no conversion here, and none
+        // wanted: mixing in Cocoa coordinates is what puts a window on the
+        // wrong monitor.
+        let display = DisplayLayout.displayID(forCGRect: bounds).flatMap { displays[$0] }
+
         return WindowInfo(
             id: windowNumber,
             pid: pid,
             appName: runningApp?.localizedName ?? ownerName,
             title: title,
             frame: bounds,
-            appIcon: runningApp?.icon
+            appIcon: runningApp?.icon,
+            display: display
         )
     }
 }

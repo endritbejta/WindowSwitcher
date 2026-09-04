@@ -5,15 +5,17 @@ import SwiftUI
 final class SettingsWindowController: NSWindowController {
 
     init() {
-        let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 440, height: 390),
-            styleMask: [.titled, .closable],
-            backing: .buffered,
-            defer: false
-        )
+        // `NSHostingController` as the content view controller keeps the window
+        // exactly the height of the SwiftUI content, and re-sizes it when that
+        // content changes — the Command+Tab warning appears and disappears with
+        // the modifier setting. A hardcoded frame would have to be tall enough
+        // for the tallest state and leave a gap in every other one.
+        let window = NSWindow(contentViewController: NSHostingController(
+            rootView: SettingsView(settings: .shared)
+        ))
+        window.styleMask = [.titled, .closable]
         window.title = "Window Switcher — Settings"
         window.center()
-        window.contentView = NSHostingView(rootView: SettingsView(settings: .shared))
         super.init(window: window)
     }
 
@@ -26,21 +28,25 @@ final class SettingsWindowController: NSWindowController {
     }
 }
 
-/// Lets the user rebind the switch gesture (modifier + trigger key). Bindings
-/// write straight through to `AppSettings`, which persists and takes effect on
-/// the very next keystroke.
+/// Lets the user rebind the switch gesture (modifier + trigger key) and choose
+/// how the switcher behaves across displays. Bindings write straight through
+/// to `AppSettings`, which persists and takes effect on the very next
+/// keystroke.
 private struct SettingsView: View {
     @ObservedObject var settings: AppSettings
 
+    /// Fixed width so the pickers and captions line up; the height follows the
+    /// content.
+    static let width: CGFloat = 460
+
+    /// Displays currently attached. Kept in state and refreshed from the
+    /// screen-parameters notification so the hint below doesn't go on claiming
+    /// two monitors after one is unplugged with this window open.
+    @State private var screenCount = NSScreen.screens.count
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 22) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Shortcut")
-                    .font(.system(size: 18, weight: .semibold))
-                Text("Choose how you want to open the window switcher.")
-                    .font(.system(size: 12))
-                    .foregroundStyle(.secondary)
-            }
+        VStack(alignment: .leading, spacing: 20) {
+            section("Shortcut", "Choose how you want to open the window switcher.")
 
             Picker("Hold", selection: $settings.modifier) {
                 ForEach(SwitchModifier.allCases) { Text($0.display).tag($0) }
@@ -68,10 +74,7 @@ private struct SettingsView: View {
             }
             .font(.system(size: 13))
 
-            Text("Hold \(settings.modifier.symbol) and tap \(settings.triggerKey.symbol) to cycle forward, add Shift to go backward, and release \(settings.modifier.symbol) to focus the selected window.")
-                .font(.system(size: 12))
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
+            caption("Hold \(settings.modifier.symbol) and tap \(settings.triggerKey.symbol) to cycle forward, add Shift to go backward, and release \(settings.modifier.symbol) to focus the selected window.")
 
             // Command overrides the system app switcher; warn about it.
             if settings.modifier == .command {
@@ -84,9 +87,48 @@ private struct SettingsView: View {
                 .fixedSize(horizontal: false, vertical: true)
             }
 
-            Spacer()
+            Divider().padding(.vertical, 2)
+
+            section("Displays", "Where the switcher appears, and which windows it lists.")
+
+            Picker("Show switcher on", selection: $settings.overlayDisplay) {
+                ForEach(OverlayDisplay.allCases) { Text($0.display).tag($0) }
+            }
+            .pickerStyle(.menu)
+
+            Picker("List windows from", selection: $settings.displayScope) {
+                ForEach(DisplayScope.allCases) { Text($0.display).tag($0) }
+            }
+            .pickerStyle(.menu)
+
+            caption(screenCount > 1
+                ? "\(screenCount) displays attached. Each card is badged with the number of the display its window is on."
+                : "One display attached — these take effect as soon as you connect another.")
+
         }
         .padding(28)
-        .frame(width: 440, height: 390, alignment: .topLeading)
+        .frame(width: Self.width, alignment: .topLeading)
+        .onReceive(NotificationCenter.default.publisher(
+            for: NSApplication.didChangeScreenParametersNotification
+        )) { _ in
+            screenCount = NSScreen.screens.count
+        }
+    }
+
+    private func section(_ title: String, _ subtitle: String) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title)
+                .font(.system(size: 18, weight: .semibold))
+            Text(subtitle)
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private func caption(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: 12))
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
     }
 }

@@ -59,6 +59,12 @@ enum WindowActivator {
             AXUIElementSetAttributeValue(axWindow, kAXMinimizedAttribute as CFString, kCFBooleanFalse)
             // Make it the app's main/active window and raise it above siblings.
             AXUIElementSetAttributeValue(axWindow, kAXMainAttribute as CFString, kCFBooleanTrue)
+            // And give it keyboard focus specifically. Main and focused are
+            // separate in AppKit, and the gap between them shows up most when
+            // switching between two windows of the *same* app on different
+            // displays: raising alone can leave the app still typing into the
+            // window on the screen you just left.
+            AXUIElementSetAttributeValue(axWindow, kAXFocusedAttribute as CFString, kCFBooleanTrue)
             AXUIElementPerformAction(axWindow, kAXRaiseAction as CFString)
         }
 

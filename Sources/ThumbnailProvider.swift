@@ -22,9 +22,15 @@ enum ThumbnailProvider {
     /// published to the UI progressively. Windows that can't be captured
     /// (closed, or permission missing) are simply skipped.
     static func captureThumbnails(
-        for windowIDs: [CGWindowID],
+        for windows: [WindowInfo],
         onImage: @escaping (CGWindowID, NSImage) -> Void
     ) {
+        let windowIDs = windows.map(\.id)
+        // Each window is captured at its own display's density, so a preview
+        // of a Retina window stays sharp when the overlay is showing next to
+        // previews from a 1x monitor. Read here, off the main actor's data,
+        // before hopping to the capture task.
+        let scales = Dictionary(windows.map { ($0.id, $0.displayScale) }, uniquingKeysWith: { first, _ in first })
         log.notice("capture requested for \(windowIDs.count) windows; screenRecording granted=\(CGPreflightScreenCaptureAccess())")
         Task.detached(priority: .userInitiated) {
             // One shareable-content query covers every window we need.
@@ -47,7 +53,7 @@ enum ThumbnailProvider {
             for id in windowIDs {
                 guard let scWindow = scWindowsByID[id] else { continue }
                 matched += 1
-                guard let image = await capture(scWindow) else { continue }
+                guard let image = await capture(scWindow, pointScale: scales[id] ?? 2) else { continue }
                 captured += 1
                 await MainActor.run { onImage(id, image) }
             }
@@ -56,7 +62,14 @@ enum ThumbnailProvider {
     }
 
     /// Capture one window at preview resolution.
-    private static func capture(_ scWindow: SCWindow) async -> NSImage? {
+    ///
+    /// `pointScale` is the backing scale of the display the window is on.
+    /// `SCStreamConfiguration` sizes are in *pixels* while `SCWindow.frame` is
+    /// in *points*, so it is what turns a preview that is merely the right
+    /// shape into one that is actually sharp on a Retina screen — and it has
+    /// to come from the window's own display, not the one the overlay happens
+    /// to be showing on.
+    private static func capture(_ scWindow: SCWindow, pointScale: CGFloat) async -> NSImage? {
         // A filter scoped to just this window — no desktop, no other windows.
         let filter = SCContentFilter(desktopIndependentWindow: scWindow)
 
@@ -68,8 +81,8 @@ enum ThumbnailProvider {
         let scale = min(1, maxDimension / max(width, height))
 
         let config = SCStreamConfiguration()
-        config.width = max(1, Int(width * scale))
-        config.height = max(1, Int(height * scale))
+        config.width = max(1, Int(width * scale * pointScale))
+        config.height = max(1, Int(height * scale * pointScale))
         config.showsCursor = false
         config.ignoreGlobalClipDisplay = true
 
@@ -78,7 +91,14 @@ enum ThumbnailProvider {
                 contentFilter: filter,
                 configuration: config
             )
-            return NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
+            // Size the NSImage in points, not pixels: those extra pixels are
+            // only useful if AppKit knows they are a denser rendition of the
+            // same preview rather than a bigger one.
+            return NSImage(
+                cgImage: cgImage,
+                size: NSSize(width: CGFloat(cgImage.width) / pointScale,
+                             height: CGFloat(cgImage.height) / pointScale)
+            )
         } catch {
             log.error("captureImage failed for window \(scWindow.windowID): \(error.localizedDescription, privacy: .public)")
             return nil

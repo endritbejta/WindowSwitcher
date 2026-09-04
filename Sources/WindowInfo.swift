@@ -31,10 +31,24 @@ struct WindowInfo: Identifiable, Equatable {
     /// placeholder shown until the live thumbnail finishes rendering.
     let appIcon: NSImage?
 
+    /// The display this window is (mostly) on. Nil only if the window sits
+    /// entirely outside every attached screen, which happens for a moment
+    /// while a display is being connected or rearranged.
+    let display: DisplayRef?
+
     /// What we actually show as the label: prefer the window title, fall back
     /// to the app name so an entry is never blank.
     var displayTitle: String {
         title.isEmpty ? appName : title
+    }
+
+    /// Points-to-pixels factor of the display this window is on. Previews are
+    /// captured at this density so a window on a Retina screen doesn't come
+    /// back soft just because a 1x monitor is plugged in next to it.
+    var displayScale: CGFloat {
+        // Capped at 2: beyond that the extra pixels are invisible in a tile
+        // this small and only cost memory.
+        min(display?.scale ?? 2, 2)
     }
 
     static func == (lhs: WindowInfo, rhs: WindowInfo) -> Bool {

@@ -11,6 +11,9 @@ final class SwitcherController: HotKeyManagerDelegate {
     private let model = SwitcherModel()
 
     private var panel: SwitcherPanel?
+    /// Kept so each gesture can hand the SwiftUI root the display it is about
+    /// to appear on, before the panel measures itself.
+    private var hostingView: NSHostingView<SwitcherView>?
     private var isVisible = false
 
     /// Thumbnails from previous gestures, keyed by window id. Unlike
@@ -76,7 +79,14 @@ final class SwitcherController: HotKeyManagerDelegate {
     /// relative to the focused window so it behaves correctly in both fixed and
     /// recently-used ordering.
     private func open(reverse: Bool) {
-        let windows = windowOrder.orderedWindows()
+        let allWindows = windowOrder.orderedWindows()
+        guard !allWindows.isEmpty else { return }
+
+        // Which display the overlay belongs on is decided before the list is
+        // built, because in per-display mode it also decides what's *in* the
+        // list.
+        guard let screen = targetScreen(among: allWindows) else { return }
+        let windows = scoped(allWindows, to: screen)
         guard !windows.isEmpty else { return }
 
         model.windows = windows
@@ -92,19 +102,87 @@ final class SwitcherController: HotKeyManagerDelegate {
         model.thumbnails = thumbnailCache
 
         let count = windows.count
-        // Position of the currently-focused window in the list (0 if unknown).
-        let currentIndex = windows.firstIndex { $0.id == windowOrder.frontWindowID } ?? 0
         let delta = reverse ? -1 : 1
-        model.selectedIndex = ((currentIndex + delta) % count + count) % count
+        if let currentIndex = windows.firstIndex(where: { $0.id == windowOrder.frontWindowID }) {
+            model.selectedIndex = ((currentIndex + delta) % count + count) % count
+        } else {
+            // The focused window isn't in this list — normal in per-display
+            // mode, where the pointer can be on one monitor while the keyboard
+            // focus is on another. Starting from an assumed index 0 would then
+            // skip the first entry on a forward tap, so land on the end the
+            // gesture is heading towards instead.
+            model.selectedIndex = reverse ? count - 1 : 0
+        }
 
-        if panel == nil {
-            let hosting = NSHostingView(rootView: SwitcherView(model: model))
+        // Tell the view how much room this display gives it, then let the
+        // panel size itself to the result. Passed through the root view rather
+        // than the observable model so the new layout is resolved by the time
+        // `present(on:)` reads the fitting size.
+        let rootView = SwitcherView(
+            model: model,
+            availableSize: CGSize(
+                width: screen.visibleFrame.width - SwitcherPanel.screenMargin * 2,
+                height: screen.visibleFrame.height - SwitcherPanel.screenMargin * 2
+            ),
+            // Badges only earn their place when the list actually spans screens.
+            showsDisplayBadges: NSScreen.screens.count > 1
+                && AppSettings.shared.displayScope == .allDisplays
+        )
+
+        if let hostingView {
+            hostingView.rootView = rootView
+        } else {
+            let hosting = NSHostingView(rootView: rootView)
+            hostingView = hosting
             panel = SwitcherPanel(rootView: hosting)
         }
-        panel?.presentCentered()
+        panel?.present(on: screen)
         isVisible = true
 
         captureThumbnails(for: windows)
+    }
+
+    // MARK: - Multi-display placement
+
+    /// The display the overlay should appear on, per `AppSettings`.
+    ///
+    /// Each mode falls through to the others rather than to a hard-coded
+    /// screen: the pointer can be in the dead zone between two monitors, and
+    /// the focused window's display is unknown for the moment after one is
+    /// unplugged. Landing on the wrong screen is recoverable; not showing at
+    /// all is not.
+    private func targetScreen(among windows: [WindowInfo]) -> NSScreen? {
+        switch AppSettings.shared.overlayDisplay {
+        case .pointer:
+            return NSScreen.screenWithMouse ?? focusedWindowScreen(among: windows) ?? DisplayLayout.menuBarScreen
+        case .activeWindow:
+            return focusedWindowScreen(among: windows) ?? NSScreen.screenWithMouse ?? DisplayLayout.menuBarScreen
+        case .main:
+            return DisplayLayout.menuBarScreen ?? NSScreen.screenWithMouse
+        }
+    }
+
+    /// The display showing the window that currently has keyboard focus.
+    private func focusedWindowScreen(among windows: [WindowInfo]) -> NSScreen? {
+        guard
+            let front = windows.first(where: { $0.id == windowOrder.frontWindowID }),
+            let id = front.display?.id
+        else { return nil }
+        return DisplayLayout.screen(for: id)
+    }
+
+    /// Narrows the list to `screen` when the user asked for per-display
+    /// switching. Falls back to the full list if that display has nothing on
+    /// it — an empty overlay would swallow the gesture and leave the shortcut
+    /// looking broken.
+    private func scoped(_ windows: [WindowInfo], to screen: NSScreen) -> [WindowInfo] {
+        guard
+            AppSettings.shared.displayScope == .activeDisplay,
+            NSScreen.screens.count > 1,
+            let id = screen.displayID
+        else { return windows }
+        let onScreen = windows.filter { $0.display?.id == id }
+        return onScreen.isEmpty ? windows : onScreen
     }
 
     private func moveSelection(reverse: Bool) {
@@ -125,7 +203,7 @@ final class SwitcherController: HotKeyManagerDelegate {
     /// Capture window previews via ScreenCaptureKit, publishing results back on
     /// the main actor as they arrive so the grid fills in progressively.
     private func captureThumbnails(for windows: [WindowInfo]) {
-        ThumbnailProvider.captureThumbnails(for: windows.map(\.id)) { [weak self] id, image in
+        ThumbnailProvider.captureThumbnails(for: windows) { [weak self] id, image in
             guard let self, self.isVisible else { return }
             self.model.thumbnails[id] = image
             self.thumbnailCache[id] = image

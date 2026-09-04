@@ -2,6 +2,13 @@ import SwiftUI
 
 /// Observable model backing the switcher UI. The controller mutates these
 /// properties and SwiftUI re-renders automatically.
+///
+/// Deliberately holds only what changes *during* a gesture. The per-gesture
+/// constants (how much room the target display gives us, whether display
+/// badges are wanted) are passed into `SwitcherView` directly instead, so the
+/// hosting view resolves them synchronously when the root view is replaced —
+/// a published change would only land on the next SwiftUI update, after the
+/// panel has already measured and placed itself.
 final class SwitcherModel: ObservableObject {
     @Published var windows: [WindowInfo] = []
     @Published var selectedIndex: Int = 0
@@ -17,16 +24,36 @@ final class SwitcherModel: ObservableObject {
 struct SwitcherView: View {
     @ObservedObject var model: SwitcherModel
 
+    /// The largest the panel may become: the visible area of the display it is
+    /// about to appear on, less the panel's margin. The grid is laid out to
+    /// fit inside this, so plugging in a monitor half the size of the last one
+    /// changes the tiling instead of running the overlay off the edge.
+    var availableSize: CGSize = CGSize(width: 1200, height: 800)
+
+    /// Whether to mark each card with the display it lives on. Only worth the
+    /// ink with more than one screen attached and all of them being listed.
+    var showsDisplayBadges: Bool = false
+
+    /// Natural card size. Used as-is whenever the display has room for it.
     private let cardWidth: CGFloat = 168
     private let cardHeight: CGFloat = 104
     private let cardSpacing: CGFloat = 14
+    /// Rows longer than this get hard to scan, so we add rows before columns —
+    /// right up until the display runs out of height.
+    private let preferredColumns: Int = 6
+
+    private let outerPadding: CGFloat = 20
+    private let stackSpacing: CGFloat = 14
+    private let labelHeight: CGFloat = 16
 
     var body: some View {
-        VStack(spacing: 14) {
-            grid
-            selectedLabel
+        let layout = cardLayout
+
+        return VStack(spacing: stackSpacing) {
+            grid(layout)
+            selectedLabel(width: layout.gridWidth)
         }
-        .padding(20)
+        .padding(outerPadding)
         .background(
             RoundedRectangle(cornerRadius: 20, style: .continuous)
                 .fill(.thickMaterial)
@@ -41,19 +68,22 @@ struct SwitcherView: View {
         .transaction { $0.animation = nil }
     }
 
-    /// A centered flow of up to N cards per row. We compute a column count that
-    /// keeps the panel a pleasant width for the number of windows.
-    private var grid: some View {
-        let columns = columnCount(for: model.windows.count)
-        let layout = Array(repeating: GridItem(.fixed(cardWidth), spacing: cardSpacing), count: columns)
-        return LazyVGrid(columns: layout, spacing: cardSpacing) {
+    /// A centered flow of cards, in the tiling `cardLayout` picked for this
+    /// display.
+    private func grid(_ layout: CardLayout) -> some View {
+        let columns = Array(
+            repeating: GridItem(.fixed(layout.width), spacing: cardSpacing),
+            count: layout.columns
+        )
+        return LazyVGrid(columns: columns, spacing: cardSpacing) {
             ForEach(Array(model.windows.enumerated()), id: \.element.id) { index, window in
                 WindowCard(
                     window: window,
                     thumbnail: model.thumbnails[window.id],
                     isSelected: index == model.selectedIndex,
-                    width: cardWidth,
-                    height: cardHeight
+                    displayNumber: showsDisplayBadges ? window.display?.number : nil,
+                    width: layout.width,
+                    height: layout.height
                 )
                 // Clicking a card selects and commits it immediately.
                 .onTapGesture { NotificationCenter.default.post(name: .switcherCardClicked, object: index) }
@@ -63,23 +93,101 @@ struct SwitcherView: View {
 
     /// A single, small readout for the selected window's name — the same idea
     /// as the label under the system's own Command+Tab switcher, kept subtle
-    /// since the app icon on the card already identifies each entry.
-    private var selectedLabel: some View {
+    /// since the app icon on the card already identifies each entry. With more
+    /// than one display attached it also names the screen the window will come
+    /// up on, so committing never moves your attention somewhere unexpected.
+    private func selectedLabel(width: CGFloat) -> some View {
         Group {
             if model.windows.indices.contains(model.selectedIndex) {
-                Text(model.windows[model.selectedIndex].displayTitle)
-                    .font(.system(size: 13, weight: .medium))
-                    .lineLimit(1)
-                    .foregroundStyle(.secondary)
+                let window = model.windows[model.selectedIndex]
+                HStack(spacing: 6) {
+                    Text(window.displayTitle)
+                        .lineLimit(1)
+                    if showsDisplayBadges, let display = window.display {
+                        Text("·")
+                            .opacity(0.5)
+                        // Same purple as the badge, so the name and the number
+                        // on the card read as one piece of information.
+                        Text("\(display.number)")
+                            .foregroundStyle(Color(nsColor: AppIcon.brandTint))
+                        Text(display.name)
+                            .lineLimit(1)
+                            .opacity(0.7)
+                    }
+                }
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(.secondary)
             }
         }
-        .frame(maxWidth: CGFloat(columnCount(for: model.windows.count)) * (cardWidth + cardSpacing))
-        .frame(height: 16)
+        .frame(maxWidth: width)
+        .frame(height: labelHeight)
     }
 
-    /// Keep rows to at most 6 cards; grow rows before growing width.
-    private func columnCount(for count: Int) -> Int {
-        max(1, min(6, count))
+    // MARK: - Fitting the grid to the display
+
+    /// The tiling chosen for this gesture.
+    private struct CardLayout {
+        let columns: Int
+        let width: CGFloat
+        let height: CGFloat
+        /// Total width of the grid, so the label can be constrained to match.
+        let gridWidth: CGFloat
+    }
+
+    /// Room left for the grid once the panel's own padding, the label and the
+    /// stack spacing are accounted for.
+    private var gridBudget: CGSize {
+        CGSize(
+            width: max(cardWidth * 0.4, availableSize.width - outerPadding * 2),
+            height: max(cardHeight * 0.4,
+                        availableSize.height - outerPadding * 2 - labelHeight - stackSpacing)
+        )
+    }
+
+    /// Picks the largest tiling that fits the target display.
+    ///
+    /// Cards keep their natural size whenever there is room. When there isn't
+    /// — a laptop screen with a lot of windows open — we first spend the
+    /// display's full width on extra columns, trading height for width, and
+    /// only then shrink the cards. Both beat the alternative of a panel whose
+    /// bottom rows are off the screen, since a window you can't see is a
+    /// window you can't pick.
+    private var cardLayout: CardLayout {
+        let count = max(1, model.windows.count)
+        let budget = gridBudget
+        let aspect = cardHeight / cardWidth
+
+        // Natural size first, then 5% smaller each time, down to 40%.
+        for step in 0...12 {
+            let width = (cardWidth * (1 - CGFloat(step) * 0.05)).rounded()
+            let height = (width * aspect).rounded()
+            let fitting = max(1, Int((budget.width + cardSpacing) / (width + cardSpacing)))
+
+            // Comfortable first (at most `preferredColumns` per row), then the
+            // full width of the display before giving up on this card size.
+            for columns in [min(count, preferredColumns, fitting), min(count, fitting)] {
+                let rows = Int((Double(count) / Double(columns)).rounded(.up))
+                let needed = CGFloat(rows) * height + CGFloat(rows - 1) * cardSpacing
+                if needed <= budget.height {
+                    return layout(columns: columns, width: width, height: height)
+                }
+            }
+        }
+
+        // Smaller than 40% stops being recognisable, so at that point we take
+        // the widest rows the display allows and accept the overflow.
+        let width = (cardWidth * 0.4).rounded()
+        let fitting = max(1, Int((budget.width + cardSpacing) / (width + cardSpacing)))
+        return layout(columns: min(count, fitting), width: width, height: (width * aspect).rounded())
+    }
+
+    private func layout(columns: Int, width: CGFloat, height: CGFloat) -> CardLayout {
+        CardLayout(
+            columns: columns,
+            width: width,
+            height: height,
+            gridWidth: CGFloat(columns) * width + CGFloat(columns - 1) * cardSpacing
+        )
     }
 }
 
@@ -90,6 +198,9 @@ private struct WindowCard: View {
     let window: WindowInfo
     let thumbnail: NSImage?
     let isSelected: Bool
+    /// The window's display number, or nil on a single-screen setup where the
+    /// badge would say the same thing on every card.
+    let displayNumber: Int?
     let width: CGFloat
     let height: CGFloat
 
@@ -103,12 +214,13 @@ private struct WindowCard: View {
             if let icon = window.appIcon {
                 Image(nsImage: icon)
                     .resizable()
-                    .frame(width: 26, height: 26)
+                    .frame(width: iconSize, height: iconSize)
                     .shadow(color: .black.opacity(0.25), radius: 2, y: 1)
                     .padding(6)
             }
         }
         .frame(width: width, height: height)
+        .overlay(alignment: .topLeading) { displayBadge }
         .overlay(
             RoundedRectangle(cornerRadius: 11, style: .continuous)
                 .strokeBorder(Color.accentColor, lineWidth: 2)
@@ -122,6 +234,35 @@ private struct WindowCard: View {
         // — it picks up that position change too, so the card visibly slides
         // to its new slot instead of the selection just snapping instantly.
     }
+
+    /// Scales with the card so a shrunken tile doesn't become all icon.
+    private var iconSize: CGFloat { max(16, (width / 168) * 26) }
+
+    /// Which monitor this window is on.
+    ///
+    /// Painted in the app's own purple rather than a neutral material: the
+    /// badge sits on top of an arbitrary window preview, so it needs a colour
+    /// of its own to read against both a white document and a dark editor. It
+    /// also keeps the badge clearly distinct from the accent-coloured
+    /// selection ring, which means something else entirely.
+    @ViewBuilder
+    private var displayBadge: some View {
+        if let displayNumber {
+            Text("\(displayNumber)")
+                .font(.system(size: badgeFontSize, weight: .bold, design: .rounded))
+                .foregroundStyle(.white)
+                .frame(width: badgeDiameter, height: badgeDiameter)
+                .background(Circle().fill(Color(nsColor: AppIcon.brandTint)))
+                .overlay(Circle().strokeBorder(Color.white.opacity(0.28), lineWidth: 1))
+                .shadow(color: .black.opacity(0.35), radius: 2, y: 1)
+                .padding(7)
+        }
+    }
+
+    /// Badge metrics track the card, so a grid shrunk to fit a laptop display
+    /// doesn't end up mostly badge.
+    private var badgeDiameter: CGFloat { max(15, (width / 168) * 22) }
+    private var badgeFontSize: CGFloat { max(9, (width / 168) * 12) }
 
     @ViewBuilder
     private var previewImage: some View {
