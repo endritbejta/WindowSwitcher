@@ -187,6 +187,23 @@ log show --last 5m --predicate 'subsystem == "com.example.windowswitcher"' --inf
 `./build.sh` prints the identity on every build and warns when it differs from
 the previous build, since that change is what invalidates an existing grant.
 
+#### Window-order diagnostics
+
+To investigate the recently-used order going wrong, turn on the `mru` log
+(off by default, read live — no relaunch needed):
+
+```bash
+defaults write com.example.windowswitcher debug.mruLogging -bool YES
+log stream --predicate 'subsystem == "com.example.windowswitcher" AND category == "mru"' --level info
+```
+
+Every open, selection, commit and app activation is logged with a millisecond
+timestamp. Lines where the switcher's history disagrees with what actually has
+focus are prefixed `ANOMALY <kind>` (`zorder-lag`, `head-not-focused`,
+`selection-anchor-not-head`, `stale-notification`, `activation-not-front`,
+`focus-sibling`, `tap-disabled`, …). Turn it off again with
+`defaults delete com.example.windowswitcher debug.mruLogging`.
+
 ## Building from source
 
 ```bash

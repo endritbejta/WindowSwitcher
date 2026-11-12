@@ -99,6 +99,12 @@ final class HotKeyManager {
         // The system disables a tap that runs too long or is interrupted; just
         // re-enable it and pass the event through.
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+            // Logged because a modifier release lost while the tap was off
+            // leaves `gestureActive` stuck.
+            MRULog.anomaly(
+                "tap-disabled",
+                "\(type == .tapDisabledByTimeout ? "timeout" : "userInput") gestureActive=\(gestureActive)"
+            )
             if let tap = eventTap { CGEvent.tapEnable(tap: tap, enable: true) }
             return Unmanaged.passUnretained(event)
         }

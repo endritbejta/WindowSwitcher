@@ -62,13 +62,78 @@ final class SwitcherController: HotKeyManagerDelegate {
             ? model.windows[model.selectedIndex] : nil
         close()
         if let selected {
-            windowOrder.markUsed(selected.id)
+            logCommit(selected)
+            windowOrder.markUsed(selected.id, source: "commit")
             WindowActivator.activate(selected)
+            scheduleCommitVerification(selected)
         }
     }
 
     func hotKeyCancel() {
+        MRULog.info("cancel")
         close()
+    }
+
+    // MARK: - Diagnostics (no-ops unless MRULog is enabled)
+
+    /// Uptime of the previous commit, to show how rapid back-to-back taps were.
+    private var lastCommitMs: Double?
+
+    private func logSelection(windows: [WindowInfo], reverse: Bool) {
+        guard MRULog.isEnabled else { return }
+        let anchor = windows.firstIndex(where: { $0.id == windowOrder.frontWindowID })
+        MRULog.info(
+            "select index=\(model.selectedIndex) \(MRULog.describe(windows[model.selectedIndex].id))"
+            + " anchor=\(anchor.map(String.init) ?? "absent") reverse=\(reverse)"
+            + " list=\(MRULog.describe(windows.map(\.id)))"
+        )
+        // In recently-used mode the focused window should head the list, so
+        // the selection is anchored at 0. Any other anchor means the list and
+        // the anchor disagree, and a quick tap won't land on the previous window.
+        if AppSettings.shared.windowOrder == .recentlyUsed, let anchor, anchor != 0 {
+            MRULog.anomaly(
+                "selection-anchor-not-head",
+                "anchor \(MRULog.describe(windowOrder.frontWindowID)) at index \(anchor); quick tap lands on \(MRULog.describe(windows[model.selectedIndex].id)) instead of \(MRULog.describe(windows.count > 1 ? windows[reverse ? windows.count - 1 : 1].id : nil))"
+            )
+        }
+    }
+
+    private func logCommit(_ selected: WindowInfo) {
+        guard MRULog.isEnabled else { return }
+        let now = MRULog.nowMs
+        let gap = lastCommitMs.map { String(format: "%.0fms", now - $0) } ?? "n/a"
+        lastCommitMs = now
+        MRULog.info(
+            "commit \(MRULog.describe(selected.id)) pid=\(selected.pid)"
+            + " index=\(model.selectedIndex)/\(model.windows.count) sinceLastCommit=\(gap)"
+        )
+    }
+
+    /// A moment after activating, check that macOS actually put the chosen
+    /// window in front. A mismatch means history was promoted for a switch
+    /// that didn't (fully) happen — refused activation, or the app focusing a
+    /// sibling window instead.
+    private func scheduleCommitVerification(_ selected: WindowInfo) {
+        guard MRULog.isEnabled else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+            guard let focus = MRULog.actualFocus() else {
+                MRULog.anomaly("commit-unverified", "no frontmost application after committing \(MRULog.describe(selected.id))")
+                return
+            }
+            if focus.pid != selected.pid {
+                MRULog.anomaly(
+                    "activation-not-front",
+                    "committed \(MRULog.describe(selected.id)) pid=\(selected.pid) but frontmost is pid=\(focus.pid)(\(focus.app))"
+                )
+            } else if let focused = focus.windowID, focused != selected.id {
+                MRULog.anomaly(
+                    "focus-sibling",
+                    "committed \(MRULog.describe(selected.id)) but app focused \(MRULog.describe(focused))"
+                )
+            } else {
+                MRULog.info("commit verified \(MRULog.describe(selected.id))")
+            }
+        }
     }
 
     // MARK: - Presentation
@@ -113,6 +178,7 @@ final class SwitcherController: HotKeyManagerDelegate {
             // gesture is heading towards instead.
             model.selectedIndex = reverse ? count - 1 : 0
         }
+        logSelection(windows: windows, reverse: reverse)
 
         // Tell the view how much room this display gives it, then let the
         // panel size itself to the result. Passed through the root view rather
