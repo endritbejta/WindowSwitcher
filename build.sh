@@ -8,6 +8,7 @@
 #         ./build.sh run        build, then launch it from ./build
 #         ./build.sh install    build, install into /Applications, launch there
 #         ./build.sh doctor     report the code identity and why grants stick
+#         ./build.sh test       run the window-ordering unit tests
 #
 # On the permission problem this script guards against: macOS remembers a
 # privacy grant against the app's "designated requirement", a code-signing
@@ -58,6 +59,20 @@ if [[ "$COMMAND" == "doctor" ]]; then
 	echo "== Recorded identity from the last build =="
 	if [ -f "$DR_RECORD" ]; then cat "$DR_RECORD"; else echo "  (none yet)"; fi
 	exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# test: unit-test the pure window-ordering rules. No signing, no permissions,
+# no app bundle — just WindowHistory.swift compiled with the test runner.
+# ---------------------------------------------------------------------------
+if [[ "$COMMAND" == "test" ]]; then
+	mkdir -p "$BUILD_DIR"
+	echo "==> Compiling tests"
+	swiftc -O -target "$(uname -m)-apple-macos14.0" \
+		-o "$BUILD_DIR/WindowHistoryTests" \
+		"$ROOT/Sources/WindowHistory.swift" "$ROOT/Tests/main.swift"
+	echo "==> Running tests"
+	exec "$BUILD_DIR/WindowHistoryTests"
 fi
 
 # Build for the machine's native architecture. Minimum macOS 14 for the

@@ -63,7 +63,15 @@ final class SwitcherController: HotKeyManagerDelegate {
         close()
         if let selected {
             logCommit(selected)
-            windowOrder.markUsed(selected.id, source: "commit")
+            // A window that closed while the overlay was up must not enter
+            // the history. Its app is still brought forward, and the
+            // activation that follows records whichever window really gets
+            // focus.
+            if WindowEnumerator.windowExists(selected.id) {
+                windowOrder.noteCommit(selected)
+            } else {
+                MRULog.info("commit target \(MRULog.describe(selected.id)) no longer exists; not recorded")
+            }
             WindowActivator.activate(selected)
             scheduleCommitVerification(selected)
         }
@@ -81,19 +89,19 @@ final class SwitcherController: HotKeyManagerDelegate {
 
     private func logSelection(windows: [WindowInfo], reverse: Bool) {
         guard MRULog.isEnabled else { return }
-        let anchor = windows.firstIndex(where: { $0.id == windowOrder.frontWindowID })
+        let anchor = windows.firstIndex(where: { $0.id == windowOrder.currentWindowID })
         MRULog.info(
             "select index=\(model.selectedIndex) \(MRULog.describe(windows[model.selectedIndex].id))"
             + " anchor=\(anchor.map(String.init) ?? "absent") reverse=\(reverse)"
             + " list=\(MRULog.describe(windows.map(\.id)))"
         )
-        // In recently-used mode the focused window should head the list, so
-        // the selection is anchored at 0. Any other anchor means the list and
-        // the anchor disagree, and a quick tap won't land on the previous window.
+        // An invariant. In recently-used mode the current window is promoted
+        // before the list is built, so the anchor can only be 0. If it is
+        // anything else, a quick tap won't land on the previous window.
         if AppSettings.shared.windowOrder == .recentlyUsed, let anchor, anchor != 0 {
             MRULog.anomaly(
                 "selection-anchor-not-head",
-                "anchor \(MRULog.describe(windowOrder.frontWindowID)) at index \(anchor); quick tap lands on \(MRULog.describe(windows[model.selectedIndex].id)) instead of \(MRULog.describe(windows.count > 1 ? windows[reverse ? windows.count - 1 : 1].id : nil))"
+                "anchor \(MRULog.describe(windowOrder.currentWindowID)) at index \(anchor)"
             )
         }
     }
@@ -166,18 +174,17 @@ final class SwitcherController: HotKeyManagerDelegate {
         thumbnailCache = thumbnailCache.filter { liveIDs.contains($0.key) }
         model.thumbnails = thumbnailCache
 
-        let count = windows.count
-        let delta = reverse ? -1 : 1
-        if let currentIndex = windows.firstIndex(where: { $0.id == windowOrder.frontWindowID }) {
-            model.selectedIndex = ((currentIndex + delta) % count + count) % count
-        } else {
-            // The focused window isn't in this list — normal in per-display
-            // mode, where the pointer can be on one monitor while the keyboard
-            // focus is on another. Starting from an assumed index 0 would then
-            // skip the first entry on a forward tap, so land on the end the
-            // gesture is heading towards instead.
-            model.selectedIndex = reverse ? count - 1 : 0
-        }
+        // Anchored on the window the order manager has resolved as current,
+        // which is also the window it put at the head in recently-used mode.
+        // The anchor can be absent, which is normal in per-display mode: the
+        // pointer can be on one monitor while keyboard focus is on another.
+        // `initialSelection` then starts at the end the gesture is heading
+        // towards.
+        model.selectedIndex = WindowHistory.initialSelection(
+            count: windows.count,
+            anchor: windows.firstIndex(where: { $0.id == windowOrder.currentWindowID }),
+            reverse: reverse
+        )
         logSelection(windows: windows, reverse: reverse)
 
         // Tell the view how much room this display gives it, then let the
@@ -231,7 +238,7 @@ final class SwitcherController: HotKeyManagerDelegate {
     /// The display showing the window that currently has keyboard focus.
     private func focusedWindowScreen(among windows: [WindowInfo]) -> NSScreen? {
         guard
-            let front = windows.first(where: { $0.id == windowOrder.frontWindowID }),
+            let front = windows.first(where: { $0.id == windowOrder.currentWindowID }),
             let id = front.display?.id
         else { return nil }
         return DisplayLayout.screen(for: id)

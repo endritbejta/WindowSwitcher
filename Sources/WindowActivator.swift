@@ -26,6 +26,10 @@ enum WindowActivator {
         return unsafeBitCast(sym, to: GetWindowFn.self)
     }()
 
+    /// Upper bound, in seconds, on one focused-window query. A responsive app
+    /// answers in well under a millisecond.
+    private static let focusQueryTimeout: Float = 0.25
+
     /// The CGWindowID of `pid`'s currently-focused window, via the
     /// Accessibility API's `kAXFocusedWindowAttribute`.
     ///
@@ -38,10 +42,15 @@ enum WindowActivator {
     static func focusedWindowID(forPID pid: pid_t) -> CGWindowID? {
         guard let getWindowID else { return nil }
         let appElement = AXUIElementCreateApplication(pid)
+        // This runs on every switcher open and every app activation, on the
+        // main thread that also services the key-event tap. Without a cap, a
+        // hung app would block it for AX's default timeout of several seconds.
+        AXUIElementSetMessagingTimeout(appElement, focusQueryTimeout)
         var value: CFTypeRef?
         guard
             AXUIElementCopyAttributeValue(appElement, kAXFocusedWindowAttribute as CFString, &value) == .success,
-            let value
+            let value,
+            CFGetTypeID(value) == AXUIElementGetTypeID()
         else { return nil }
         let axWindow = value as! AXUIElement
 
@@ -104,12 +113,15 @@ enum WindowActivator {
             }
         }
 
-        // Fallback: match by title and top-left corner. Used only if the
-        // private helper is ever unavailable.
+        // Fallback: match by title and top-left corner.
         for axWindow in axWindows where axWindowMatches(axWindow, window) {
             return axWindow
         }
-        return axWindows.first
+        // No match. With the id helper available that is a definite answer:
+        // the window is gone, or isn't one the app exposes. Raising some other
+        // window of the app would leave the user on a window they never chose.
+        // Without the helper, keep the old best effort of raising the first.
+        return getWindowID == nil ? axWindows.first : nil
     }
 
     private static func axWindowMatches(_ axWindow: AXUIElement, _ window: WindowInfo) -> Bool {

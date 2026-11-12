@@ -198,10 +198,17 @@ log stream --predicate 'subsystem == "com.example.windowswitcher" AND category =
 ```
 
 Every open, selection, commit and app activation is logged with a millisecond
-timestamp. Lines where the switcher's history disagrees with what actually has
-focus are prefixed `ANOMALY <kind>` (`zorder-lag`, `head-not-focused`,
-`selection-anchor-not-head`, `stale-notification`, `activation-not-front`,
-`focus-sibling`, `tap-disabled`, …). Turn it off again with
+timestamp, including how each activation was handled (promoted, or ignored as
+stale or as this app's own). Lines where the switcher's state disagrees with
+what actually has focus are prefixed `ANOMALY <kind>`:
+
+- `head-not-current` and `selection-anchor-not-head` mean an ordering invariant
+  broke. They should never appear.
+- `activation-not-front` and `focus-sibling` mean macOS didn't carry out a
+  switch as asked.
+- `tap-disabled` means the key-event tap was turned off by the system.
+
+Turn it off again with
 `defaults delete com.example.windowswitcher debug.mruLogging`.
 
 ## Building from source
@@ -220,6 +227,7 @@ Xcode project is involved.
 | `./build.sh run` | Build, then launch from `build/` |
 | `./build.sh install` | Build, install into `/Applications`, launch from there |
 | `./build.sh doctor` | Report the code identity and anything that would break grants |
+| `./build.sh test` | Run the window-ordering unit tests (no signing or permissions needed) |
 | `./reinstall.sh` | Clean reinstall over a previous version |
 | `./setup-signing.sh` | Create the stable signing identity for this Mac |
 | `./setup-signing.sh status` | Show the identity and the requirement it produces |
@@ -263,7 +271,7 @@ confirm the requirements match.
 | Concern | Approach | File |
 |---|---|---|
 | Discover all real windows | `CGWindowListCopyWindowInfo`, filtered to layer‑0, visible, non‑system windows | `WindowEnumerator.swift` |
-| Window ordering | Fixed (stable positions) or recently‑used; own list seeded from z‑order | `WindowOrderManager.swift` |
+| Window ordering | Fixed (stable positions) or recently‑used. Own history, promoted from the actually focused window (never the lagging z‑order), the switcher's own commits, and non‑stale app activations; unit‑tested rules | `WindowHistory.swift`, `WindowOrderManager.swift` |
 | Global shortcut, and detecting modifier **release** | `CGEvent` tap on keyDown + flagsChanged | `HotKeyManager.swift` |
 | Focus one specific window | Accessibility API + `_AXUIElementGetWindow` to match by CGWindowID | `WindowActivator.swift` |
 | Live previews | On‑demand ScreenCaptureKit stills rendered at preview size, off the main thread | `ThumbnailProvider.swift` |
@@ -324,6 +332,8 @@ WindowSwitcher/
 ├── README.md
 ├── Tools/
 │   └── main.swift               # Renders AppIcon.icns at build time (no committed asset)
+├── Tests/
+│   └── main.swift               # Unit tests for the ordering rules (./build.sh test)
 └── Sources/
     ├── main.swift               # NSApplication bootstrap (accessory app)
     ├── AppDelegate.swift        # Lifecycle, menu bar, permission gating, relaunch
@@ -338,7 +348,9 @@ WindowSwitcher/
     ├── DisplayLayout.swift      # Screen geometry: CG <-> Cocoa coords, window -> display
     ├── WindowEnumerator.swift   # Discover + filter real windows
     ├── WindowInfo.swift         # Value type for one window (id, title, app, icon, display)
-    ├── WindowOrderManager.swift # Fixed or recently-used ordering
+    ├── WindowHistory.swift      # Pure ordering rules: history, current window, activation filter
+    ├── WindowOrderManager.swift # Feeds live system state into WindowHistory
+    ├── MRULog.swift             # Opt-in ordering diagnostics (os_log "mru")
     ├── WindowActivator.swift    # Focus one window by CGWindowID (AX API)
     ├── ThumbnailProvider.swift  # ScreenCaptureKit previews
     ├── SwitcherController.swift # Orchestration

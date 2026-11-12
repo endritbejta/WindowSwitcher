@@ -65,6 +65,34 @@ enum WindowEnumerator {
         return result
     }
 
+    /// Ids of every window that still exists, on screen or not. That includes
+    /// windows on other Spaces, minimised windows and windows of hidden apps.
+    /// It is used to decide which history entries are really gone; the
+    /// on-screen list can't answer that.
+    ///
+    /// Returns nil if the window server can't be queried. Callers must then
+    /// keep their history rather than treat everything as closed.
+    static func existingWindowIDs() -> Set<CGWindowID>? {
+        guard let raw = CGWindowListCopyWindowInfo([.optionAll], kCGNullWindowID) as? [[String: Any]] else {
+            return nil
+        }
+        var ids = Set<CGWindowID>()
+        ids.reserveCapacity(raw.count)
+        for dict in raw {
+            if let id = dict[kCGWindowNumber as String] as? CGWindowID { ids.insert(id) }
+        }
+        return ids
+    }
+
+    /// Whether `id` is still a live window. If the window server can't answer,
+    /// the window is assumed to exist, so the caller's normal path runs.
+    static func windowExists(_ id: CGWindowID) -> Bool {
+        guard let raw = CGWindowListCopyWindowInfo(.optionIncludingWindow, id) as? [[String: Any]] else {
+            return true
+        }
+        return raw.contains { ($0[kCGWindowNumber as String] as? CGWindowID) == id }
+    }
+
     /// Converts one CoreGraphics window dictionary into a `WindowInfo`, or
     /// returns nil if it fails any of the "is this a real window" checks.
     private static func makeWindowInfo(
