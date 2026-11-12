@@ -8,6 +8,7 @@
 #         ./build.sh run        build, then launch it from ./build
 #         ./build.sh install    build, install into /Applications, launch there
 #         ./build.sh doctor     report the code identity and why grants stick
+#         ./build.sh test       run the window-ordering unit tests
 #
 # On the permission problem this script guards against: macOS remembers a
 # privacy grant against the app's "designated requirement", a code-signing
@@ -23,7 +24,10 @@ BUILD_DIR="$ROOT/build"
 APP="$BUILD_DIR/WindowSwitcher.app"
 MACOS_DIR="$APP/Contents/MacOS"
 EXECUTABLE="$MACOS_DIR/WindowSwitcher"
-BUNDLE_ID="com.example.windowswitcher"
+BUNDLE_ID="com.endritbejta.windowswitcher"
+# The placeholder id of every build before the rename. A grant from those
+# builds lives under this id, not the one above.
+LEGACY_BUNDLE_ID="com.example.windowswitcher"
 
 CERT_CN="WindowSwitcher Self-Signed"
 SIGN_KEYCHAIN="$HOME/Library/Keychains/windowswitcher-signing.keychain-db"
@@ -60,10 +64,39 @@ if [[ "$COMMAND" == "doctor" ]]; then
 	exit 0
 fi
 
+# ---------------------------------------------------------------------------
+# test: unit-test the pure ordering rules and gesture state machine. No signing,
+# no permissions, no app bundle — just those two files and the test runner.
+# ---------------------------------------------------------------------------
+if [[ "$COMMAND" == "test" ]]; then
+	mkdir -p "$BUILD_DIR"
+	echo "==> Compiling tests"
+	swiftc -O -target "$(uname -m)-apple-macos14.0" \
+		-o "$BUILD_DIR/UnitTests" \
+		"$ROOT/Sources/WindowHistory.swift" "$ROOT/Sources/GestureTracker.swift" \
+		"$ROOT/Sources/WindowFilter.swift" \
+		"$ROOT/Sources/AppBundle.swift" \
+		"$ROOT/Tests/main.swift"
+	echo "==> Running tests"
+	exec "$BUILD_DIR/UnitTests"
+fi
+
 # Build for the machine's native architecture. Minimum macOS 14 for the
 # ScreenCaptureKit screenshot API used to render window previews.
 ARCH="$(uname -m)"
 TARGET="${ARCH}-apple-macos14.0"
+
+# The bundle id is written in three places, and all three must agree: the
+# signature, Info.plist, and the Swift constant that names the log subsystem.
+# A mismatch would produce an app whose permission grants and logs go under
+# different identities, so it fails the build here rather than surfacing
+# later as a permissions mystery.
+PLIST_ID="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$ROOT/Info.plist")"
+SWIFT_ID="$(sed -n 's/^ *static let identifier = "\(.*\)"$/\1/p' "$ROOT/Sources/AppBundle.swift")"
+if [[ "$PLIST_ID" != "$BUNDLE_ID" || "$SWIFT_ID" != "$BUNDLE_ID" ]]; then
+	echo "error: bundle id mismatch — build.sh: $BUNDLE_ID, Info.plist: $PLIST_ID, AppBundle.swift: $SWIFT_ID" >&2
+	exit 1
+fi
 
 echo "==> Compiling ($TARGET)"
 rm -rf "$APP"
@@ -171,6 +204,9 @@ if [ -f "$DR_RECORD" ] && [ -n "$CURRENT_DR" ]; then
 		   you can do it yourself:
 
 		       tccutil reset Accessibility $BUNDLE_ID
+		       tccutil reset Accessibility $LEGACY_BUNDLE_ID   # grants from pre-rename builds
+
+		   or run ./reinstall.sh, which clears both ids and reinstalls.
 
 		MSG
 	fi

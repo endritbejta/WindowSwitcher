@@ -39,10 +39,20 @@ final class SwitcherController: HotKeyManagerDelegate {
     /// missing (the event tap can't be created).
     @discardableResult
     func start() -> Bool {
-        hotKeys.start()
+        // Ordering observers start only together with a working tap. Before
+        // Accessibility is granted, every query they make would fail, and
+        // nothing could use the results.
+        guard hotKeys.start() else { return false }
+        // Before the first Accessibility IPC. windowOrder.start() registers
+        // the focus observer, which would otherwise run with AX's
+        // multi-second default.
+        WindowActivator.installMessagingTimeout()
+        windowOrder.start()
+        return true
     }
 
     func stop() {
+        windowOrder.stop()
         hotKeys.stop()
     }
 
@@ -62,22 +72,89 @@ final class SwitcherController: HotKeyManagerDelegate {
             ? model.windows[model.selectedIndex] : nil
         close()
         if let selected {
-            windowOrder.markUsed(selected.id)
+            logCommit(selected)
+            // A window that closed while the overlay was up must not enter
+            // the history. Its app is still brought forward, and the
+            // activation that follows records whichever window really gets
+            // focus.
+            if WindowEnumerator.windowExists(selected.id) {
+                windowOrder.noteCommit(selected)
+            } else {
+                MRULog.info("commit target \(MRULog.describe(selected.id)) no longer exists; not recorded")
+            }
             WindowActivator.activate(selected)
+            scheduleCommitVerification(selected)
         }
     }
 
     func hotKeyCancel() {
+        MRULog.info("cancel")
         close()
+    }
+
+    // MARK: - Diagnostics (no-ops unless MRULog is enabled)
+
+    /// Uptime of the previous commit, to show how rapid back-to-back taps were.
+    private var lastCommitMs: Double?
+
+    private func logSelection(windows: [WindowInfo], reverse: Bool) {
+        guard MRULog.isEnabled else { return }
+        let anchor = windows.firstIndex(where: { $0.id == windowOrder.currentWindowID })
+        MRULog.info(
+            "select index=\(model.selectedIndex) \(MRULog.describe(windows[model.selectedIndex].id))"
+            + " anchor=\(anchor.map(String.init) ?? "absent") reverse=\(reverse)"
+            + " list=\(MRULog.describe(windows.map(\.id)))"
+        )
+        // The ordering invariant (current window heads the list) is checked
+        // once, as `head-not-current`, by WindowOrderManager, which owns
+        // that state.
+    }
+
+    private func logCommit(_ selected: WindowInfo) {
+        guard MRULog.isEnabled else { return }
+        let now = MRULog.nowMs
+        let gap = lastCommitMs.map { String(format: "%.0fms", now - $0) } ?? "n/a"
+        lastCommitMs = now
+        MRULog.info(
+            "commit \(MRULog.describe(selected.id)) pid=\(selected.pid)"
+            + " index=\(model.selectedIndex)/\(model.windows.count) sinceLastCommit=\(gap)"
+        )
+    }
+
+    /// A moment after activating, check that macOS actually put the chosen
+    /// window in front. A mismatch means history was promoted for a switch
+    /// that didn't (fully) happen — refused activation, or the app focusing a
+    /// sibling window instead.
+    private func scheduleCommitVerification(_ selected: WindowInfo) {
+        guard MRULog.isEnabled else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+            guard let focus = MRULog.actualFocus() else {
+                MRULog.anomaly("commit-unverified", "no frontmost application after committing \(MRULog.describe(selected.id))")
+                return
+            }
+            if focus.pid != selected.pid {
+                MRULog.anomaly(
+                    "activation-not-front",
+                    "committed \(MRULog.describe(selected.id)) pid=\(selected.pid) but frontmost is pid=\(focus.pid)(\(focus.app))"
+                )
+            } else if let focused = focus.windowID, focused != selected.id {
+                MRULog.anomaly(
+                    "focus-sibling",
+                    "committed \(MRULog.describe(selected.id)) but app focused \(MRULog.describe(focused))"
+                )
+            } else {
+                MRULog.info("commit verified \(MRULog.describe(selected.id))")
+            }
+        }
     }
 
     // MARK: - Presentation
 
     /// Snapshot the windows, show the overlay, and pre-select the window next
-    /// to the currently-focused one — a single forward tap lands on the neighbour
-    /// after it, a reverse (Shift) tap on the one before. This is computed
-    /// relative to the focused window so it behaves correctly in both fixed and
-    /// recently-used ordering.
+    /// to the current one — a single forward tap lands on the neighbour after
+    /// it, a reverse (Shift) tap on the one before. "Current" is whatever
+    /// `WindowOrderManager.currentWindowID` resolved, so this behaves
+    /// correctly in both fixed and recently-used ordering.
     private func open(reverse: Bool) {
         let allWindows = windowOrder.orderedWindows()
         guard !allWindows.isEmpty else { return }
@@ -101,18 +178,18 @@ final class SwitcherController: HotKeyManagerDelegate {
         thumbnailCache = thumbnailCache.filter { liveIDs.contains($0.key) }
         model.thumbnails = thumbnailCache
 
-        let count = windows.count
-        let delta = reverse ? -1 : 1
-        if let currentIndex = windows.firstIndex(where: { $0.id == windowOrder.frontWindowID }) {
-            model.selectedIndex = ((currentIndex + delta) % count + count) % count
-        } else {
-            // The focused window isn't in this list — normal in per-display
-            // mode, where the pointer can be on one monitor while the keyboard
-            // focus is on another. Starting from an assumed index 0 would then
-            // skip the first entry on a forward tap, so land on the end the
-            // gesture is heading towards instead.
-            model.selectedIndex = reverse ? count - 1 : 0
-        }
+        // Anchored on the window the order manager has resolved as current,
+        // which is also the window it put at the head in recently-used mode.
+        // The anchor can be absent, which is normal in per-display mode: the
+        // pointer can be on one monitor while keyboard focus is on another.
+        // `initialSelection` then starts at the end the gesture is heading
+        // towards.
+        model.selectedIndex = WindowHistory.initialSelection(
+            count: windows.count,
+            anchor: windows.firstIndex(where: { $0.id == windowOrder.currentWindowID }),
+            reverse: reverse
+        )
+        logSelection(windows: windows, reverse: reverse)
 
         // Tell the view how much room this display gives it, then let the
         // panel size itself to the result. Passed through the root view rather
@@ -165,7 +242,7 @@ final class SwitcherController: HotKeyManagerDelegate {
     /// The display showing the window that currently has keyboard focus.
     private func focusedWindowScreen(among windows: [WindowInfo]) -> NSScreen? {
         guard
-            let front = windows.first(where: { $0.id == windowOrder.frontWindowID }),
+            let front = windows.first(where: { $0.id == windowOrder.currentWindowID }),
             let id = front.display?.id
         else { return nil }
         return DisplayLayout.screen(for: id)
@@ -194,19 +271,36 @@ final class SwitcherController: HotKeyManagerDelegate {
 
     private func close() {
         panel?.orderOut(nil)
+        NSCursor.restoreAfterSwitcher()
         isVisible = false
-        hotKeys.gestureDidEnd()
+        // Nobody will see the rest of this gesture's previews.
+        thumbnailTask?.cancel()
+        thumbnailTask = nil
+        // The gesture's own state belongs to HotKeyManager. Ending it here
+        // could cut short a gesture that started after this close was queued.
     }
 
     // MARK: - Thumbnails
 
+    /// The capture pass for the gesture on screen, cancelled when it closes.
+    private var thumbnailTask: Task<Void, Never>?
+    /// Increases with every open, so a capture that finishes after its
+    /// gesture closed can tell it no longer owns the overlay.
+    private var gestureGeneration = 0
+
     /// Capture window previews via ScreenCaptureKit, publishing results back on
     /// the main actor as they arrive so the grid fills in progressively.
     private func captureThumbnails(for windows: [WindowInfo]) {
-        ThumbnailProvider.captureThumbnails(for: windows) { [weak self] id, image in
-            guard let self, self.isVisible else { return }
-            self.model.thumbnails[id] = image
+        thumbnailTask?.cancel()
+        gestureGeneration += 1
+        let generation = gestureGeneration
+        thumbnailTask = ThumbnailProvider.captureThumbnails(for: windows) { [weak self] id, image in
+            guard let self else { return }
+            // The image is still correct for its window, so it is always
+            // cached. It is shown only if its own gesture is still on screen.
             self.thumbnailCache[id] = image
+            guard self.isVisible, generation == self.gestureGeneration else { return }
+            self.model.thumbnails[id] = image
         }
     }
 
@@ -215,5 +309,9 @@ final class SwitcherController: HotKeyManagerDelegate {
               model.windows.indices.contains(index) else { return }
         model.selectedIndex = index
         hotKeyCommit()
+        // The modifier may still be held. Without this, the tap would treat
+        // the gesture as running and keep swallowing Escape until the
+        // modifier is released.
+        hotKeys.gestureDidEnd()
     }
 }

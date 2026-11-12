@@ -34,9 +34,10 @@ enum SwitchModifier: String, CaseIterable, Identifiable {
 
 /// How the switcher orders the window list.
 enum WindowOrder: String, CaseIterable, Identifiable {
-    /// Positions never change between switches — tiles stay put (default).
+    /// Positions never change between switches — tiles stay put.
     case fixed
-    /// The window you just used jumps to the front, like Windows Alt+Tab.
+    /// The window you just used jumps to the front, like Windows Alt+Tab
+    /// (default).
     case recentlyUsed
 
     var id: String { rawValue }

@@ -168,9 +168,30 @@ for confirmation before changing anything, and leaves your settings alone.
 To clear the entries by hand instead:
 
 ```bash
-tccutil reset Accessibility com.example.windowswitcher
-tccutil reset ScreenCapture com.example.windowswitcher
+tccutil reset Accessibility com.endritbejta.windowswitcher
+tccutil reset ScreenCapture com.endritbejta.windowswitcher
 ```
+
+#### The bundle-id change
+
+Builds before this change used the placeholder id `com.example.windowswitcher`.
+The id is now `com.endritbejta.windowswitcher`. Because the id is part of the
+code identity that permissions are tied to, **every existing install must grant
+Accessibility (and Screen Recording, if used) once more** after upgrading.
+Afterwards, the System Settings list may show an old *Window Switcher* entry
+that no longer applies.
+
+- **Settings carry over.** On first launch, your shortcut, window order and
+  display preferences are copied from the old id.
+- **The old grant is detected.** The setup window offers **Reset Permissions &
+  Restart**. That repair, and `./reinstall.sh`, clear the entries for both the
+  new id and the old one.
+- **To clear the old entries by hand:**
+
+  ```bash
+  tccutil reset Accessibility com.example.windowswitcher
+  tccutil reset ScreenCapture com.example.windowswitcher
+  ```
 
 ### Diagnosing
 
@@ -181,11 +202,40 @@ The setup window's **Copy Details** button copies the bundle path, signing kind
 and designated requirement. The same facts are logged at every launch:
 
 ```bash
-log show --last 5m --predicate 'subsystem == "com.example.windowswitcher"' --info
+log show --last 5m --predicate 'subsystem == "com.endritbejta.windowswitcher"' --info
 ```
 
 `./build.sh` prints the identity on every build and warns when it differs from
 the previous build, since that change is what invalidates an existing grant.
+
+#### Window-order diagnostics
+
+To investigate the recently-used order going wrong, turn on the `mru` log
+(off by default, read live — no relaunch needed):
+
+```bash
+defaults write com.endritbejta.windowswitcher debug.mruLogging -bool YES
+log stream --predicate 'subsystem == "com.endritbejta.windowswitcher" AND category == "mru"' --level info
+```
+
+Every open, selection, commit and app activation is logged with a millisecond
+timestamp, including how each activation was handled (promoted, or ignored as
+stale or as this app's own). Lines where the switcher's state disagrees with
+what actually has focus are prefixed `ANOMALY <kind>`:
+
+- `head-not-current` means the ordering invariant broke: in recently-used
+  mode, the current window wasn't at the head of the list. It should never
+  appear.
+- `activation-not-front` and `focus-sibling` mean macOS didn't carry out a
+  switch as asked.
+- `tap-disabled` means the key-event tap was turned off by the system.
+- `missed-release` means a modifier release was never delivered and the
+  gesture was committed from the live modifier state instead.
+- `ax-timeout` means an app didn't answer Accessibility in time while one of
+  its windows was being raised.
+
+Turn it off again with
+`defaults delete com.endritbejta.windowswitcher debug.mruLogging`.
 
 ## Building from source
 
@@ -203,6 +253,7 @@ Xcode project is involved.
 | `./build.sh run` | Build, then launch from `build/` |
 | `./build.sh install` | Build, install into `/Applications`, launch from there |
 | `./build.sh doctor` | Report the code identity and anything that would break grants |
+| `./build.sh test` | Run the window-ordering unit tests (no signing or permissions needed) |
 | `./reinstall.sh` | Clean reinstall over a previous version |
 | `./setup-signing.sh` | Create the stable signing identity for this Mac |
 | `./setup-signing.sh status` | Show the identity and the requirement it produces |
@@ -246,8 +297,8 @@ confirm the requirements match.
 | Concern | Approach | File |
 |---|---|---|
 | Discover all real windows | `CGWindowListCopyWindowInfo`, filtered to layer‑0, visible, non‑system windows | `WindowEnumerator.swift` |
-| Window ordering | Fixed (stable positions) or recently‑used; own list seeded from z‑order | `WindowOrderManager.swift` |
-| Global shortcut, and detecting modifier **release** | `CGEvent` tap on keyDown + flagsChanged | `HotKeyManager.swift` |
+| Window ordering | Fixed (stable positions) or recently‑used. Own history, promoted from the actually focused window (never the lagging z‑order), the switcher's own commits (still trusted while that window stays in front, for apps that raise a window without focusing it), app activations that don't predate a commit still settling, and focus moving between one app's windows (AX observer on the frontmost app only). All state and rules live in one pure type, which the unit tests drive directly | `WindowHistory.swift`, `WindowOrderManager.swift`, `FocusObserver.swift` |
+| Global shortcut, and detecting modifier **release** | `CGEvent` tap on keyDown + flagsChanged. The callback only decides whether to swallow; the work runs after it returns; a lost release is recovered from the live modifier state | `HotKeyManager.swift`, `GestureTracker.swift` |
 | Focus one specific window | Accessibility API + `_AXUIElementGetWindow` to match by CGWindowID | `WindowActivator.swift` |
 | Live previews | On‑demand ScreenCaptureKit stills rendered at preview size, off the main thread | `ThumbnailProvider.swift` |
 | Overlay UI | SwiftUI grid in a non‑activating `NSPanel`, system materials for Light/Dark | `SwitcherView.swift`, `SwitcherPanel.swift` |
@@ -261,6 +312,14 @@ confirm the requirements match.
 
 - **Why an event tap** rather than a Carbon hot-key: only the raw event stream
   tells us when the modifier is *released*, which is how the Windows gesture commits.
+- **Why the tap callback does almost nothing**: the tap sits in front of every
+  keystroke, and macOS disables a tap that is slow to answer. A disabled tap
+  can drop the modifier release that ends a gesture. So the callback only
+  decides whether to swallow the key, and everything else runs after it has
+  returned. Every Accessibility call is capped at 0.5 s, so a hung app can't
+  stall the main thread for long. If a release is lost anyway, the live
+  modifier state is checked when the tap is re-enabled, on the next keystroke,
+  and every 0.2 s, but only while a gesture is in progress.
 - **Why a non-activating panel**: showing the overlay must not steal focus from
   the app you're holding the modifier over, or releasing it couldn't end the
   gesture cleanly.
@@ -296,6 +355,11 @@ Shareable content is fetched once per gesture; each window is then rendered
 directly at preview size, so no full-resolution bitmap is ever allocated. This
 is why the minimum target is macOS 14.
 
+The capture pass is cancelled when the switcher closes. A burst of quick taps
+therefore never leaves several passes running side by side. A preview that
+lands after its gesture has closed is cached for next time, but is never shown
+in a later gesture's overlay.
+
 ## Project structure
 
 ```
@@ -307,8 +371,11 @@ WindowSwitcher/
 ├── README.md
 ├── Tools/
 │   └── main.swift               # Renders AppIcon.icns at build time (no committed asset)
+├── Tests/
+│   └── main.swift               # Unit tests for the ordering rules (./build.sh test)
 └── Sources/
     ├── main.swift               # NSApplication bootstrap (accessory app)
+    ├── AppBundle.swift          # Bundle id constants + one-time settings migration from the old id
     ├── AppDelegate.swift        # Lifecycle, menu bar, permission gating, relaunch
     ├── AppIcon.swift            # Menu-bar glyph + app icon artwork (one source)
     ├── AppSettings.swift        # Persisted, rebindable shortcut
@@ -318,10 +385,14 @@ WindowSwitcher/
     ├── PermissionSetup.swift    # Diagnoses blockers; installs to /Applications, resets TCC
     ├── OnboardingWindow.swift   # First-run setup, blocker repairs, Restart App
     ├── HotKeyManager.swift      # CGEvent tap: modifier+key, and modifier-release
+    ├── GestureTracker.swift     # Pure gesture state machine, incl. lost-release recovery
     ├── DisplayLayout.swift      # Screen geometry: CG <-> Cocoa coords, window -> display
     ├── WindowEnumerator.swift   # Discover + filter real windows
     ├── WindowInfo.swift         # Value type for one window (id, title, app, icon, display)
-    ├── WindowOrderManager.swift # Fixed or recently-used ordering
+    ├── WindowHistory.swift      # Pure ordering state + rules (WindowOrderState), unit-tested
+    ├── WindowOrderManager.swift # I/O only: feeds live system state into WindowOrderState
+    ├── FocusObserver.swift      # AX observer: focus moving between the frontmost app's windows
+    ├── MRULog.swift             # Opt-in ordering diagnostics (os_log "mru")
     ├── WindowActivator.swift    # Focus one window by CGWindowID (AX API)
     ├── ThumbnailProvider.swift  # ScreenCaptureKit previews
     ├── SwitcherController.swift # Orchestration

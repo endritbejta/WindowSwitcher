@@ -95,7 +95,7 @@ if [[ "$COMMAND" == "status" ]]; then
 		echo "    Builds will be pinned to this certificate, giving the"
 		echo "    designated requirement:"
 		echo
-		echo "        identifier \"com.example.windowswitcher\" and certificate leaf = H\"$(echo "$HASH" | tr 'A-Z' 'a-z')\""
+		echo "        identifier \"com.endritbejta.windowswitcher\" and certificate leaf = H\"$(echo "$HASH" | tr 'A-Z' 'a-z')\""
 		echo
 		echo "    Every Mac that should keep its permission grant needs this"
 		echo "    same certificate — export it here, import it there."

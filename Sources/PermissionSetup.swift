@@ -1,7 +1,7 @@
 import AppKit
 import os
 
-private let log = Logger(subsystem: "com.example.windowswitcher", category: "setup")
+private let log = Logger(subsystem: AppBundle.logSubsystem, category: "setup")
 
 /// Works out *why* the app is not able to run, and performs the repairs.
 ///
@@ -13,7 +13,7 @@ private let log = Logger(subsystem: "com.example.windowswitcher", category: "set
 enum PermissionSetup {
 
     static var bundleIdentifier: String {
-        Bundle.main.bundleIdentifier ?? "com.example.windowswitcher"
+        Bundle.main.bundleIdentifier ?? AppBundle.identifier
     }
 
     /// Something standing between the user and a permission grant that lasts.
@@ -181,8 +181,17 @@ enum PermissionSetup {
     static func resetGrantsAndRelaunch(completion: @escaping (RepairResult) -> Void) {
         let services = ["Accessibility", "ScreenCapture"]
         var reset = false
-        for service in services where runTCCUtilReset(service: service) {
+        for service in services where runTCCUtilReset(service: service, bundleID: bundleIdentifier) {
             reset = true
+        }
+        // Also clear entries left by builds under the pre-rename id. They show
+        // up as a second "Window Switcher" in the Accessibility list, toggled
+        // on but belonging to an identity that no longer exists. This is best
+        // effort: on a Mac where the old id never ran, there is nothing to clear.
+        if AppBundle.legacyIdentifier != bundleIdentifier {
+            for service in services {
+                runTCCUtilReset(service: service, bundleID: AppBundle.legacyIdentifier)
+            }
         }
 
         guard reset else {
@@ -217,10 +226,10 @@ enum PermissionSetup {
     // MARK: Shell-outs
 
     @discardableResult
-    private static func runTCCUtilReset(service: String) -> Bool {
+    private static func runTCCUtilReset(service: String, bundleID: String) -> Bool {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/tccutil")
-        process.arguments = ["reset", service, bundleIdentifier]
+        process.arguments = ["reset", service, bundleID]
         process.standardOutput = FileHandle.nullDevice
         process.standardError = FileHandle.nullDevice
         do {

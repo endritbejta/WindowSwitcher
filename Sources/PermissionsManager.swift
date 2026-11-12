@@ -2,7 +2,7 @@ import AppKit
 import CoreGraphics
 import os
 
-private let log = Logger(subsystem: "com.example.windowswitcher", category: "permissions")
+private let log = Logger(subsystem: AppBundle.logSubsystem, category: "permissions")
 
 /// Checks and requests the two macOS privacy permissions this app needs, and
 /// deep-links the user to the right System Settings pane for each.
@@ -36,11 +36,6 @@ enum PermissionsManager {
     @discardableResult
     static func requestScreenRecording() -> Bool {
         CGRequestScreenCaptureAccess()
-    }
-
-    /// Both permissions present?
-    static var allGranted: Bool {
-        hasAccessibility() && hasScreenRecording()
     }
 
     // MARK: Deep links into System Settings
