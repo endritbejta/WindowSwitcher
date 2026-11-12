@@ -268,7 +268,8 @@ final class SwitcherController: HotKeyManagerDelegate {
     private func close() {
         panel?.orderOut(nil)
         isVisible = false
-        hotKeys.gestureDidEnd()
+        // The gesture's own state belongs to HotKeyManager. Ending it here
+        // could cut short a gesture that started after this close was queued.
     }
 
     // MARK: - Thumbnails
@@ -288,5 +289,9 @@ final class SwitcherController: HotKeyManagerDelegate {
               model.windows.indices.contains(index) else { return }
         model.selectedIndex = index
         hotKeyCommit()
+        // The modifier may still be held. Without this, the tap would treat
+        // the gesture as running and keep swallowing Escape until the
+        // modifier is released.
+        hotKeys.gestureDidEnd()
     }
 }

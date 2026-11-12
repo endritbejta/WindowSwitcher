@@ -207,6 +207,10 @@ what actually has focus are prefixed `ANOMALY <kind>`:
 - `activation-not-front` and `focus-sibling` mean macOS didn't carry out a
   switch as asked.
 - `tap-disabled` means the key-event tap was turned off by the system.
+- `missed-release` means a modifier release was never delivered and the
+  gesture was committed from the live modifier state instead.
+- `ax-timeout` means an app didn't answer Accessibility in time while one of
+  its windows was being raised.
 
 Turn it off again with
 `defaults delete com.example.windowswitcher debug.mruLogging`.
@@ -272,7 +276,7 @@ confirm the requirements match.
 |---|---|---|
 | Discover all real windows | `CGWindowListCopyWindowInfo`, filtered to layer‑0, visible, non‑system windows | `WindowEnumerator.swift` |
 | Window ordering | Fixed (stable positions) or recently‑used. Own history, promoted from the actually focused window (never the lagging z‑order), the switcher's own commits, and non‑stale app activations; unit‑tested rules | `WindowHistory.swift`, `WindowOrderManager.swift` |
-| Global shortcut, and detecting modifier **release** | `CGEvent` tap on keyDown + flagsChanged | `HotKeyManager.swift` |
+| Global shortcut, and detecting modifier **release** | `CGEvent` tap on keyDown + flagsChanged. The callback only decides whether to swallow; the work runs after it returns; a lost release is recovered from the live modifier state | `HotKeyManager.swift`, `GestureTracker.swift` |
 | Focus one specific window | Accessibility API + `_AXUIElementGetWindow` to match by CGWindowID | `WindowActivator.swift` |
 | Live previews | On‑demand ScreenCaptureKit stills rendered at preview size, off the main thread | `ThumbnailProvider.swift` |
 | Overlay UI | SwiftUI grid in a non‑activating `NSPanel`, system materials for Light/Dark | `SwitcherView.swift`, `SwitcherPanel.swift` |
@@ -286,6 +290,14 @@ confirm the requirements match.
 
 - **Why an event tap** rather than a Carbon hot-key: only the raw event stream
   tells us when the modifier is *released*, which is how the Windows gesture commits.
+- **Why the tap callback does almost nothing**: the tap sits in front of every
+  keystroke, and macOS disables a tap that is slow to answer. A disabled tap
+  can drop the modifier release that ends a gesture. So the callback only
+  decides whether to swallow the key, and everything else runs after it has
+  returned. Every Accessibility call is capped at 0.5 s, so a hung app can't
+  stall the main thread for long. If a release is lost anyway, the live
+  modifier state is checked when the tap is re-enabled, on the next keystroke,
+  and every 0.2 s, but only while a gesture is in progress.
 - **Why a non-activating panel**: showing the overlay must not steal focus from
   the app you're holding the modifier over, or releasing it couldn't end the
   gesture cleanly.
@@ -345,6 +357,7 @@ WindowSwitcher/
     ├── PermissionSetup.swift    # Diagnoses blockers; installs to /Applications, resets TCC
     ├── OnboardingWindow.swift   # First-run setup, blocker repairs, Restart App
     ├── HotKeyManager.swift      # CGEvent tap: modifier+key, and modifier-release
+    ├── GestureTracker.swift     # Pure gesture state machine, incl. lost-release recovery
     ├── DisplayLayout.swift      # Screen geometry: CG <-> Cocoa coords, window -> display
     ├── WindowEnumerator.swift   # Discover + filter real windows
     ├── WindowInfo.swift         # Value type for one window (id, title, app, icon, display)

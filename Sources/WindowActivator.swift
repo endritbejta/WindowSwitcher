@@ -41,6 +41,7 @@ enum WindowActivator {
     /// actually touched. Asking the app directly is race-free.
     static func focusedWindowID(forPID pid: pid_t) -> CGWindowID? {
         guard let getWindowID else { return nil }
+        _ = configureMessagingTimeout
         let appElement = AXUIElementCreateApplication(pid)
         // This runs on every switcher open and every app activation, on the
         // main thread that also services the key-event tap. Without a cap, a
@@ -59,22 +60,49 @@ enum WindowActivator {
         return wid
     }
 
+    /// Upper bound, in seconds, on any single Accessibility call this app
+    /// makes. AX's default is several seconds per call. All of these calls
+    /// run on the main thread, which also services the key-event tap, so one
+    /// hung app could otherwise freeze the keyboard. Raising a window takes
+    /// several calls, so the budget is per call, and the sequence stops at the
+    /// first one that times out.
+    private static let messagingTimeout: Float = 0.5
+
+    /// Sets the process-wide default once. Setting it on the system-wide
+    /// element applies it to every element that has no timeout of its own.
+    private static let configureMessagingTimeout: Void = {
+        AXUIElementSetMessagingTimeout(AXUIElementCreateSystemWide(), messagingTimeout)
+    }()
+
     /// Focus the given window. Safe to call from the main thread.
     static func activate(_ window: WindowInfo) {
+        _ = configureMessagingTimeout
         let appElement = AXUIElementCreateApplication(window.pid)
 
         if let axWindow = accessibilityWindow(for: window, in: appElement) {
-            // Un-minimise defensively in case the window was collapsed.
-            AXUIElementSetAttributeValue(axWindow, kAXMinimizedAttribute as CFString, kCFBooleanFalse)
-            // Make it the app's main/active window and raise it above siblings.
-            AXUIElementSetAttributeValue(axWindow, kAXMainAttribute as CFString, kCFBooleanTrue)
-            // And give it keyboard focus specifically. Main and focused are
-            // separate in AppKit, and the gap between them shows up most when
-            // switching between two windows of the *same* app on different
-            // displays: raising alone can leave the app still typing into the
-            // window on the screen you just left.
-            AXUIElementSetAttributeValue(axWindow, kAXFocusedAttribute as CFString, kCFBooleanTrue)
-            AXUIElementPerformAction(axWindow, kAXRaiseAction as CFString)
+            // These four calls go in order, and the sequence stops at the
+            // first that can't complete. An app that didn't answer the first
+            // won't answer the rest, and each attempt would cost the full
+            // timeout.
+            let steps: [() -> AXError] = [
+                // Un-minimise defensively in case the window was collapsed.
+                { AXUIElementSetAttributeValue(axWindow, kAXMinimizedAttribute as CFString, kCFBooleanFalse) },
+                // Make it the app's main/active window and raise it above siblings.
+                { AXUIElementSetAttributeValue(axWindow, kAXMainAttribute as CFString, kCFBooleanTrue) },
+                // And give it keyboard focus specifically. Main and focused are
+                // separate in AppKit, and the gap between them shows up most when
+                // switching between two windows of the *same* app on different
+                // displays: raising alone can leave the app still typing into the
+                // window on the screen you just left.
+                { AXUIElementSetAttributeValue(axWindow, kAXFocusedAttribute as CFString, kCFBooleanTrue) },
+                { AXUIElementPerformAction(axWindow, kAXRaiseAction as CFString) },
+            ]
+            for step in steps {
+                if step() == .cannotComplete {
+                    MRULog.anomaly("ax-timeout", "raising window \(window.id) of pid \(window.pid); remaining AX steps skipped")
+                    break
+                }
+            }
         }
 
         // Finally bring the owning application forward so the raised window

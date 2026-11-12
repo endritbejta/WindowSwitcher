@@ -62,17 +62,18 @@ if [[ "$COMMAND" == "doctor" ]]; then
 fi
 
 # ---------------------------------------------------------------------------
-# test: unit-test the pure window-ordering rules. No signing, no permissions,
-# no app bundle — just WindowHistory.swift compiled with the test runner.
+# test: unit-test the pure ordering rules and gesture state machine. No signing,
+# no permissions, no app bundle — just those two files and the test runner.
 # ---------------------------------------------------------------------------
 if [[ "$COMMAND" == "test" ]]; then
 	mkdir -p "$BUILD_DIR"
 	echo "==> Compiling tests"
 	swiftc -O -target "$(uname -m)-apple-macos14.0" \
-		-o "$BUILD_DIR/WindowHistoryTests" \
-		"$ROOT/Sources/WindowHistory.swift" "$ROOT/Tests/main.swift"
+		-o "$BUILD_DIR/UnitTests" \
+		"$ROOT/Sources/WindowHistory.swift" "$ROOT/Sources/GestureTracker.swift" \
+		"$ROOT/Tests/main.swift"
 	echo "==> Running tests"
-	exec "$BUILD_DIR/WindowHistoryTests"
+	exec "$BUILD_DIR/UnitTests"
 fi
 
 # Build for the machine's native architecture. Minimum macOS 14 for the

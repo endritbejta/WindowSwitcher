@@ -1,7 +1,8 @@
-// Unit tests for the window-ordering rules in Sources/WindowHistory.swift.
+// Unit tests for the window-ordering rules (Sources/WindowHistory.swift) and
+// the gesture state machine (Sources/GestureTracker.swift).
 //
 // Run with `./build.sh test`. That compiles this file together with
-// WindowHistory.swift only. No AppKit, no permissions and no running apps are
+// those two files only. No AppKit, no permissions and no running apps are
 // needed, so the tests are fast and deterministic.
 
 import CoreGraphics
@@ -500,6 +501,128 @@ test("property: random external switches and taps keep head == truly focused win
         if d.history.order.first != d.trulyFocused { ok = false; print("    step \(step): head \(d.history.order.first!) ≠ focused \(d.trulyFocused!)"); break }
     }
     check(ok, "history diverged from the true focus order")
+}
+
+// MARK: - GestureTracker (Sources/GestureTracker.swift)
+
+print("\nGestureTracker tests")
+
+let tab: UInt16 = 48, esc: UInt16 = 53, letterQ: UInt16 = 12
+
+test("hold modifier + tap trigger cycles and swallows; release commits") {
+    var g = GestureTracker(triggerKeyCode: tab)
+    equal(g.keyDown(keyCode: tab, modifierHeld: true, shiftHeld: false), .init(swallow: true, action: .cycle(reverse: false)))
+    equal(g.keyDown(keyCode: tab, modifierHeld: true, shiftHeld: true), .init(swallow: true, action: .cycle(reverse: true)))
+    check(g.isActive)
+    equal(g.flagsChanged(modifierHeld: true), nil, "pressing another modifier mid-gesture changes nothing")
+    equal(g.flagsChanged(modifierHeld: false), .commit)
+    check(!g.isActive)
+    equal(g.flagsChanged(modifierHeld: false), nil, "a second release can't commit twice")
+}
+
+test("trigger without the modifier passes through untouched") {
+    var g = GestureTracker(triggerKeyCode: tab)
+    equal(g.keyDown(keyCode: tab, modifierHeld: false, shiftHeld: false), .init(swallow: false, action: nil))
+    check(!g.isActive)
+}
+
+test("Escape cancels an active gesture and is swallowed; passes through otherwise") {
+    var g = GestureTracker(triggerKeyCode: tab)
+    equal(g.keyDown(keyCode: esc, modifierHeld: true, shiftHeld: false), .init(swallow: false, action: nil))
+    _ = g.keyDown(keyCode: tab, modifierHeld: true, shiftHeld: false)
+    equal(g.keyDown(keyCode: esc, modifierHeld: true, shiftHeld: false), .init(swallow: true, action: .cancel))
+    equal(g.flagsChanged(modifierHeld: false), nil, "release after cancel must not commit")
+}
+
+test("other keys during a gesture pass through and don't end it") {
+    var g = GestureTracker(triggerKeyCode: tab)
+    _ = g.keyDown(keyCode: tab, modifierHeld: true, shiftHeld: false)
+    equal(g.keyDown(keyCode: letterQ, modifierHeld: true, shiftHeld: false), .init(swallow: false, action: nil))
+    check(g.isActive)
+}
+
+test("lost release: the next keystroke commits and is let through") {
+    var g = GestureTracker(triggerKeyCode: tab)
+    _ = g.keyDown(keyCode: tab, modifierHeld: true, shiftHeld: false)
+    // flagsChanged(up) never delivered (tap was disabled). User types a letter.
+    equal(g.keyDown(keyCode: letterQ, modifierHeld: false, shiftHeld: false), .init(swallow: false, action: .commit))
+    check(!g.isActive)
+}
+
+test("lost release: a bare trigger keystroke commits and is let through") {
+    var g = GestureTracker(triggerKeyCode: tab)
+    _ = g.keyDown(keyCode: tab, modifierHeld: true, shiftHeld: false)
+    equal(g.keyDown(keyCode: tab, modifierHeld: false, shiftHeld: false), .init(swallow: false, action: .commit))
+}
+
+test("lost release: resync from live flags commits once; held modifier changes nothing") {
+    var g = GestureTracker(triggerKeyCode: tab)
+    _ = g.keyDown(keyCode: tab, modifierHeld: true, shiftHeld: false)
+    equal(g.resync(modifierHeld: true), nil)
+    check(g.isActive)
+    equal(g.resync(modifierHeld: false), .commit)
+    equal(g.resync(modifierHeld: false), nil)
+}
+
+test("resync with no gesture in progress does nothing") {
+    var g = GestureTracker(triggerKeyCode: tab)
+    equal(g.resync(modifierHeld: false), nil)
+}
+
+test("end() stops swallowing Escape after a card click") {
+    var g = GestureTracker(triggerKeyCode: tab)
+    _ = g.keyDown(keyCode: tab, modifierHeld: true, shiftHeld: false)
+    g.end()
+    equal(g.keyDown(keyCode: esc, modifierHeld: true, shiftHeld: false), .init(swallow: false, action: nil))
+    equal(g.flagsChanged(modifierHeld: false), nil)
+}
+
+test("back-to-back gestures: the second one commits on its own release") {
+    // Regression guard: a queued close() for gesture 1 used to reset state
+    // that gesture 2 had already set. The tracker alone owns that state now.
+    var g = GestureTracker(triggerKeyCode: tab)
+    _ = g.keyDown(keyCode: tab, modifierHeld: true, shiftHeld: false)
+    equal(g.flagsChanged(modifierHeld: false), .commit)
+    equal(g.keyDown(keyCode: tab, modifierHeld: true, shiftHeld: false).action, .cycle(reverse: false))
+    equal(g.flagsChanged(modifierHeld: false), .commit)
+}
+
+test("rebinding the trigger keeps an in-progress gesture and uses the new key") {
+    var g = GestureTracker(triggerKeyCode: tab)
+    _ = g.keyDown(keyCode: tab, modifierHeld: true, shiftHeld: false)
+    g = g.withTriggerKeyCode(50)
+    check(g.isActive)
+    equal(g.keyDown(keyCode: 50, modifierHeld: true, shiftHeld: false).action, .cycle(reverse: false))
+    equal(g.keyDown(keyCode: tab, modifierHeld: true, shiftHeld: false), .init(swallow: false, action: nil))
+}
+
+test("property: random event streams never leave a gesture active with the modifier up") {
+    var seed: UInt64 = 0xBADC0DE
+    func next(_ n: Int) -> Int { seed = seed &* 6364136223846793005 &+ 1442695040888963407; return Int(seed >> 33) % n }
+    var g = GestureTracker(triggerKeyCode: tab)
+    var held = false
+    var commits = 0, cycles = 0, ok = true
+    for _ in 0..<20_000 {
+        switch next(6) {
+        case 0: held.toggle(); if g.flagsChanged(modifierHeld: held) == .commit { commits += 1 }
+        case 1: held.toggle()                                   // release/press lost by the tap
+        case 2: if g.resync(modifierHeld: held) == .commit { commits += 1 }
+        default:
+            let key = [tab, tab, esc, letterQ][next(4)]
+            let r = g.keyDown(keyCode: key, modifierHeld: held, shiftHeld: next(2) == 0)
+            if case .cycle = r.action { cycles += 1 }
+            if r.action == .commit { commits += 1 }
+            if r.swallow && !held { ok = false }                 // never eat keys without the modifier
+        }
+        // "Active with the modifier up" is the lost-release state. The
+        // release-check timer must always get out of it in one resync.
+        if g.isActive && !held {
+            if g.resync(modifierHeld: false) == .commit { commits += 1 } else { ok = false }
+        }
+        if g.isActive && !held { ok = false }
+    }
+    check(ok, "tracker swallowed a key or stayed active with the modifier up")
+    check(cycles > 0 && commits > 0, "stream didn't exercise the machine (cycles \(cycles), commits \(commits))")
 }
 
 // MARK: - Summary
