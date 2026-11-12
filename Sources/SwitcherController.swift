@@ -271,6 +271,7 @@ final class SwitcherController: HotKeyManagerDelegate {
 
     private func close() {
         panel?.orderOut(nil)
+        NSCursor.restoreAfterSwitcher()
         isVisible = false
         // Nobody will see the rest of this gesture's previews.
         thumbnailTask?.cancel()

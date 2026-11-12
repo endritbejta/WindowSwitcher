@@ -87,6 +87,8 @@ struct SwitcherView: View {
                 )
                 // Clicking a card selects and commits it immediately.
                 .onTapGesture { NotificationCenter.default.post(name: .switcherCardClicked, object: index) }
+                // …so the pointer says it's clickable.
+                .background(PointingHandArea())
             }
         }
     }
@@ -284,4 +286,58 @@ private struct WindowCard: View {
 extension Notification.Name {
     /// Posted with the tapped card's index (Int) as `object`.
     static let switcherCardClicked = Notification.Name("switcherCardClicked")
+}
+
+/// Shows the pointing-hand cursor while the mouse is over a card.
+///
+/// AppKit rather than SwiftUI's `onHover`/cursor rects: the switcher panel is
+/// never key and the app is never active during a gesture, and cursor rects are
+/// only honoured in the key window of the active app. A tracking area with
+/// `.activeAlways` still reports enter/move/exit here, and setting the cursor
+/// on each of those keeps it a hand while the pointer stays on the card.
+private struct PointingHandArea: NSViewRepresentable {
+    func makeNSView(context: Context) -> TrackingView { TrackingView() }
+    func updateNSView(_ nsView: TrackingView, context: Context) {}
+
+    final class TrackingView: NSView {
+        /// Whether this app last set the hand, so `restoreCursor()` only undoes
+        /// its own change and never overrides another app's cursor.
+        private static var isShowingHand = false
+
+        /// Called when the panel closes: a hidden panel gets no exit event, so
+        /// without this the hand would linger over whatever is underneath until
+        /// the mouse moves.
+        static func restoreCursor() {
+            guard isShowingHand else { return }
+            isShowingHand = false
+            NSCursor.arrow.set()
+        }
+
+        override func updateTrackingAreas() {
+            super.updateTrackingAreas()
+            trackingAreas.forEach(removeTrackingArea)
+            addTrackingArea(NSTrackingArea(
+                rect: .zero,
+                options: [.mouseEnteredAndExited, .mouseMoved, .activeAlways, .inVisibleRect],
+                owner: self
+            ))
+        }
+
+        override func mouseEntered(with event: NSEvent) { showHand() }
+        override func mouseMoved(with event: NSEvent) { showHand() }
+        override func mouseExited(with event: NSEvent) { Self.restoreCursor() }
+
+        /// Purely a cursor source; clicks go to the card above it.
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+        private func showHand() {
+            Self.isShowingHand = true
+            NSCursor.pointingHand.set()
+        }
+    }
+}
+
+extension NSCursor {
+    /// Puts the cursor back if a switcher card had changed it.
+    static func restoreAfterSwitcher() { PointingHandArea.TrackingView.restoreCursor() }
 }
