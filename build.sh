@@ -74,6 +74,7 @@ if [[ "$COMMAND" == "test" ]]; then
 	swiftc -O -target "$(uname -m)-apple-macos14.0" \
 		-o "$BUILD_DIR/UnitTests" \
 		"$ROOT/Sources/WindowHistory.swift" "$ROOT/Sources/GestureTracker.swift" \
+		"$ROOT/Sources/WindowFilter.swift" \
 		"$ROOT/Sources/AppBundle.swift" \
 		"$ROOT/Tests/main.swift"
 	echo "==> Running tests"
