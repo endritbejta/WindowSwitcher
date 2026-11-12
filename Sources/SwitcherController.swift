@@ -153,10 +153,10 @@ final class SwitcherController: HotKeyManagerDelegate {
     // MARK: - Presentation
 
     /// Snapshot the windows, show the overlay, and pre-select the window next
-    /// to the currently-focused one — a single forward tap lands on the neighbour
-    /// after it, a reverse (Shift) tap on the one before. This is computed
-    /// relative to the focused window so it behaves correctly in both fixed and
-    /// recently-used ordering.
+    /// to the current one — a single forward tap lands on the neighbour after
+    /// it, a reverse (Shift) tap on the one before. "Current" is whatever
+    /// `WindowOrderManager.currentWindowID` resolved, so this behaves
+    /// correctly in both fixed and recently-used ordering.
     private func open(reverse: Bool) {
         let allWindows = windowOrder.orderedWindows()
         guard !allWindows.isEmpty else { return }

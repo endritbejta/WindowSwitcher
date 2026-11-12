@@ -38,7 +38,12 @@ enum WindowActivator {
     /// behind the window server actually reordering, so for an app with
     /// several windows "the frontmost one in the CG list" was occasionally the
     /// wrong window — the MRU list would then promote a window the user hadn't
-    /// actually touched. Asking the app directly is race-free.
+    /// actually touched.
+    ///
+    /// Asking the app directly avoids that lag, but it isn't race-free. Just
+    /// after a raise the app can still report its previous window. That is
+    /// why `WindowOrderManager` trusts its own pending commit over this answer
+    /// while a switch settles.
     static func focusedWindowID(forPID pid: pid_t) -> CGWindowID? {
         // Without the id helper the answer can't be used, so skip the IPC.
         guard getWindowID != nil else { return nil }
@@ -91,7 +96,10 @@ enum WindowActivator {
             // won't answer the rest, and each attempt would cost the full
             // timeout.
             let steps: [() -> AXError] = [
-                // Un-minimise defensively in case the window was collapsed.
+                // Un-minimise. Only on-screen windows are listed today, so this
+                // is a no-op unless a window is minimised mid-gesture. It is
+                // the step that would bring a window back if minimised windows
+                // were ever listed.
                 { AXUIElementSetAttributeValue(axWindow, kAXMinimizedAttribute as CFString, kCFBooleanFalse) },
                 // Make it the app's main/active window and raise it above siblings.
                 { AXUIElementSetAttributeValue(axWindow, kAXMainAttribute as CFString, kCFBooleanTrue) },
@@ -113,13 +121,9 @@ enum WindowActivator {
 
         // Finally bring the owning application forward so the raised window
         // actually receives keyboard focus.
-        if let app = NSRunningApplication(processIdentifier: window.pid) {
-            if #available(macOS 14.0, *) {
-                app.activate()
-            } else {
-                app.activate(options: [.activateIgnoringOtherApps])
-            }
-        }
+        // The deployment target is macOS 14, so the old
+        // `.activateIgnoringOtherApps` fallback could never run.
+        NSRunningApplication(processIdentifier: window.pid)?.activate()
     }
 
     /// Finds the Accessibility element for `window` among the app's windows,
@@ -167,11 +171,17 @@ enum WindowActivator {
         }
 
         var posValue: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(axWindow, kAXPositionAttribute as CFString, &posValue) == .success else {
+        // The type is checked before the cast. An app that returns something
+        // other than an AXValue here would otherwise crash the switcher.
+        guard
+            AXUIElementCopyAttributeValue(axWindow, kAXPositionAttribute as CFString, &posValue) == .success,
+            let posValue,
+            CFGetTypeID(posValue) == AXValueGetTypeID()
+        else {
             return false
         }
         var point = CGPoint.zero
-        AXValueGetValue(posValue as! AXValue, .cgPoint, &point)
+        guard AXValueGetValue(posValue as! AXValue, .cgPoint, &point) else { return false }
         return abs(point.x - window.frame.origin.x) < 2 && abs(point.y - window.frame.origin.y) < 2
     }
 }

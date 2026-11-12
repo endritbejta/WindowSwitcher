@@ -38,11 +38,6 @@ enum PermissionsManager {
         CGRequestScreenCaptureAccess()
     }
 
-    /// Both permissions present?
-    static var allGranted: Bool {
-        hasAccessibility() && hasScreenRecording()
-    }
-
     // MARK: Deep links into System Settings
 
     static func openAccessibilitySettings() {
