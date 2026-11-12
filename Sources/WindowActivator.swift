@@ -40,7 +40,8 @@ enum WindowActivator {
     /// wrong window — the MRU list would then promote a window the user hadn't
     /// actually touched. Asking the app directly is race-free.
     static func focusedWindowID(forPID pid: pid_t) -> CGWindowID? {
-        guard let getWindowID else { return nil }
+        // Without the id helper the answer can't be used, so skip the IPC.
+        guard getWindowID != nil else { return nil }
         _ = configureMessagingTimeout
         let appElement = AXUIElementCreateApplication(pid)
         // This runs on every switcher open and every app activation, on the
@@ -53,10 +54,15 @@ enum WindowActivator {
             let value,
             CFGetTypeID(value) == AXUIElementGetTypeID()
         else { return nil }
-        let axWindow = value as! AXUIElement
+        return windowID(of: value as! AXUIElement)
+    }
 
+    /// The CGWindowID behind an Accessibility window element, or nil if the
+    /// private helper is unavailable or the element isn't a window.
+    static func windowID(of axWindow: AXUIElement) -> CGWindowID? {
+        guard let getWindowID else { return nil }
         var wid: CGWindowID = 0
-        guard getWindowID(axWindow, &wid) == .success else { return nil }
+        guard getWindowID(axWindow, &wid) == .success, wid != 0 else { return nil }
         return wid
     }
 

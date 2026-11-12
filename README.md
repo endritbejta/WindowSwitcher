@@ -275,7 +275,7 @@ confirm the requirements match.
 | Concern | Approach | File |
 |---|---|---|
 | Discover all real windows | `CGWindowListCopyWindowInfo`, filtered to layer‑0, visible, non‑system windows | `WindowEnumerator.swift` |
-| Window ordering | Fixed (stable positions) or recently‑used. Own history, promoted from the actually focused window (never the lagging z‑order), the switcher's own commits, and non‑stale app activations; unit‑tested rules | `WindowHistory.swift`, `WindowOrderManager.swift` |
+| Window ordering | Fixed (stable positions) or recently‑used. Own history, promoted from the actually focused window (never the lagging z‑order), the switcher's own commits, non‑stale app activations, and focus moving between one app's windows (AX observer on the frontmost app only); unit‑tested rules | `WindowHistory.swift`, `WindowOrderManager.swift`, `FocusObserver.swift` |
 | Global shortcut, and detecting modifier **release** | `CGEvent` tap on keyDown + flagsChanged. The callback only decides whether to swallow; the work runs after it returns; a lost release is recovered from the live modifier state | `HotKeyManager.swift`, `GestureTracker.swift` |
 | Focus one specific window | Accessibility API + `_AXUIElementGetWindow` to match by CGWindowID | `WindowActivator.swift` |
 | Live previews | On‑demand ScreenCaptureKit stills rendered at preview size, off the main thread | `ThumbnailProvider.swift` |
@@ -333,6 +333,11 @@ Shareable content is fetched once per gesture; each window is then rendered
 directly at preview size, so no full-resolution bitmap is ever allocated. This
 is why the minimum target is macOS 14.
 
+The capture pass is cancelled when the switcher closes. A burst of quick taps
+therefore never leaves several passes running side by side. A preview that
+lands after its gesture has closed is cached for next time, but is never shown
+in a later gesture's overlay.
+
 ## Project structure
 
 ```
@@ -363,6 +368,7 @@ WindowSwitcher/
     ├── WindowInfo.swift         # Value type for one window (id, title, app, icon, display)
     ├── WindowHistory.swift      # Pure ordering rules: history, current window, activation filter
     ├── WindowOrderManager.swift # Feeds live system state into WindowHistory
+    ├── FocusObserver.swift      # AX observer: focus moving between the frontmost app's windows
     ├── MRULog.swift             # Opt-in ordering diagnostics (os_log "mru")
     ├── WindowActivator.swift    # Focus one window by CGWindowID (AX API)
     ├── ThumbnailProvider.swift  # ScreenCaptureKit previews

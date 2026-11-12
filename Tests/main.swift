@@ -114,6 +114,25 @@ struct Driver {
         if case .promote(let id) = outcome.decision, recentlyUsed { history.promote(id) }
     }
 
+    /// An AX focused-window-changed event from the observed app. This mirrors
+    /// `WindowOrderManager.focusedWindowDidChange`.
+    mutating func focusChanged(_ pid: pid_t, to id: CGWindowID) {
+        let outcome = WindowFocus.onFocusedWindowChanged(
+            pid: pid, windowID: id, frontmostPID: frontmostPID, pending: pending, now: now)
+        if outcome.clearPending { pending = nil }
+        if case .promote(let w) = outcome.decision, recentlyUsed { history.promote(w) }
+    }
+
+    /// The user moves focus to another window of the frontmost app, for
+    /// example with ⌘`. No workspace notification fires, only the AX event.
+    mutating func inAppFocus(_ id: CGWindowID) {
+        now += 0.05
+        let p = pid(of: id)
+        axFocused[p] = id
+        focusChanged(p, to: id)
+        now += 0.3
+    }
+
     /// The system finishes carrying out a switch to `id`.
     mutating func systemSettles(on id: CGWindowID, notify: Bool = true) {
         let p = pid(of: id)
@@ -501,6 +520,57 @@ test("property: random external switches and taps keep head == truly focused win
         if d.history.order.first != d.trulyFocused { ok = false; print("    step \(step): head \(d.history.order.first!) ≠ focused \(d.trulyFocused!)"); break }
     }
     check(ok, "history diverged from the true focus order")
+}
+
+// MARK: - In-app focus changes (WindowFocus.onFocusedWindowChanged)
+
+test("in-app focus change from the frontmost app promotes that window") {
+    equal(WindowFocus.onFocusedWindowChanged(pid: 20, windowID: 5, frontmostPID: 20, pending: nil, now: 0),
+          .init(decision: .promote(5), clearPending: false))
+}
+
+test("in-app focus change from an app that is no longer frontmost is ignored") {
+    equal(WindowFocus.onFocusedWindowChanged(pid: 20, windowID: 5, frontmostPID: 10, pending: nil, now: 0).decision,
+          .ignoreStale)
+}
+
+test("while a commit settles, only the committed window gaining focus counts") {
+    let p = PendingCommit(pid: 20, windowID: B, now: 10)
+    equal(WindowFocus.onFocusedWindowChanged(pid: 20, windowID: 77, frontmostPID: 20, pending: p, now: 10.1),
+          .init(decision: .ignoreStale, clearPending: false), "sibling reported before the raise")
+    equal(WindowFocus.onFocusedWindowChanged(pid: 10, windowID: A, frontmostPID: 10, pending: p, now: 10.1),
+          .init(decision: .ignoreStale, clearPending: false), "the app being left is still frontmost")
+    equal(WindowFocus.onFocusedWindowChanged(pid: 20, windowID: B, frontmostPID: 20, pending: p, now: 10.1),
+          .init(decision: .promote(B), clearPending: true))
+}
+
+test("after the pending lifetime, an in-app change is a normal promotion") {
+    let p = PendingCommit(pid: 20, windowID: B, now: 10)
+    equal(WindowFocus.onFocusedWindowChanged(pid: 20, windowID: 77, frontmostPID: 20, pending: p, now: 12),
+          .init(decision: .promote(77), clearPending: true))
+}
+
+test("⌘` between two windows, then another app: a quick tap returns to the window last used") {
+    // Chrome C1/C2 (pid 20), Terminal T (pid 10). Start on C1.
+    let C1: CGWindowID = 2, C2: CGWindowID = 3, T: CGWindowID = 1
+    var d = Driver([Win(id: C1, pid: 20), Win(id: T, pid: 10), Win(id: C2, pid: 20)], focused: C1)
+    d.inAppFocus(C2)                       // ⌘` to C2: only the AX observer sees it
+    d.externalFocus(T)                     // click Terminal
+    equal(d.history.order, [T, C2, C1])
+    equal(d.open().selected, C2, "without in-app tracking this was C1")
+}
+
+test("committing to a sibling ignores the app's early report of the old window") {
+    let C1: CGWindowID = 2, C2: CGWindowID = 3, T: CGWindowID = 1
+    var d = Driver([Win(id: T, pid: 10), Win(id: C1, pid: 20), Win(id: C2, pid: 20)], focused: T)
+    d.commit(C2)
+    d.now += 0.02
+    d.frontmostPID = 20
+    d.focusChanged(20, to: C1)             // Chrome briefly reports C1
+    d.activation(20)
+    d.focusChanged(20, to: C2)             // then the raise lands
+    equal(d.history.order, [C2, T, C1])
+    check(d.pending == nil)
 }
 
 // MARK: - GestureTracker (Sources/GestureTracker.swift)

@@ -39,10 +39,16 @@ final class SwitcherController: HotKeyManagerDelegate {
     /// missing (the event tap can't be created).
     @discardableResult
     func start() -> Bool {
-        hotKeys.start()
+        // Ordering observers start only together with a working tap. Before
+        // Accessibility is granted, every query they make would fail, and
+        // nothing could use the results.
+        guard hotKeys.start() else { return false }
+        windowOrder.start()
+        return true
     }
 
     func stop() {
+        windowOrder.stop()
         hotKeys.stop()
     }
 
@@ -268,19 +274,34 @@ final class SwitcherController: HotKeyManagerDelegate {
     private func close() {
         panel?.orderOut(nil)
         isVisible = false
+        // Nobody will see the rest of this gesture's previews.
+        thumbnailTask?.cancel()
+        thumbnailTask = nil
         // The gesture's own state belongs to HotKeyManager. Ending it here
         // could cut short a gesture that started after this close was queued.
     }
 
     // MARK: - Thumbnails
 
+    /// The capture pass for the gesture on screen, cancelled when it closes.
+    private var thumbnailTask: Task<Void, Never>?
+    /// Increases with every open, so a capture that finishes after its
+    /// gesture closed can tell it no longer owns the overlay.
+    private var gestureGeneration = 0
+
     /// Capture window previews via ScreenCaptureKit, publishing results back on
     /// the main actor as they arrive so the grid fills in progressively.
     private func captureThumbnails(for windows: [WindowInfo]) {
-        ThumbnailProvider.captureThumbnails(for: windows) { [weak self] id, image in
-            guard let self, self.isVisible else { return }
-            self.model.thumbnails[id] = image
+        thumbnailTask?.cancel()
+        gestureGeneration += 1
+        let generation = gestureGeneration
+        thumbnailTask = ThumbnailProvider.captureThumbnails(for: windows) { [weak self] id, image in
+            guard let self else { return }
+            // The image is still correct for its window, so it is always
+            // cached. It is shown only if its own gesture is still on screen.
             self.thumbnailCache[id] = image
+            guard self.isVisible, generation == self.gestureGeneration else { return }
+            self.model.thumbnails[id] = image
         }
     }
 

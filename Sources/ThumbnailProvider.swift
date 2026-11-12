@@ -21,10 +21,15 @@ enum ThumbnailProvider {
     /// invoked on the **main actor** as each preview finishes, so results can be
     /// published to the UI progressively. Windows that can't be captured
     /// (closed, or permission missing) are simply skipped.
+    ///
+    /// Returns the capture task. Cancel it when the switcher closes, so a
+    /// burst of quick taps doesn't leave several full capture passes running
+    /// side by side.
+    @discardableResult
     static func captureThumbnails(
         for windows: [WindowInfo],
         onImage: @escaping (CGWindowID, NSImage) -> Void
-    ) {
+    ) -> Task<Void, Never> {
         let windowIDs = windows.map(\.id)
         // Each window is captured at its own display's density, so a preview
         // of a Retina window stays sharp when the overlay is showing next to
@@ -32,7 +37,7 @@ enum ThumbnailProvider {
         // before hopping to the capture task.
         let scales = Dictionary(windows.map { ($0.id, $0.displayScale) }, uniquingKeysWith: { first, _ in first })
         log.notice("capture requested for \(windowIDs.count) windows; screenRecording granted=\(CGPreflightScreenCaptureAccess())")
-        Task.detached(priority: .userInitiated) {
+        return Task.detached(priority: .userInitiated) {
             // One shareable-content query covers every window we need.
             let content: SCShareableContent
             do {
@@ -44,6 +49,7 @@ enum ThumbnailProvider {
                 return
             }
             log.notice("SCShareableContent returned \(content.windows.count) windows")
+            if Task.isCancelled { return }
 
             // Index the SCWindows by their CGWindowID for fast lookup.
             var scWindowsByID: [CGWindowID: SCWindow] = [:]
@@ -51,6 +57,11 @@ enum ThumbnailProvider {
 
             var matched = 0, captured = 0
             for id in windowIDs {
+                // The switcher closed. Stop before starting another capture.
+                if Task.isCancelled {
+                    log.notice("capture cancelled after \(captured) of \(windowIDs.count)")
+                    return
+                }
                 guard let scWindow = scWindowsByID[id] else { continue }
                 matched += 1
                 guard let image = await capture(scWindow, pointScale: scales[id] ?? 2) else { continue }

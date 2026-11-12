@@ -194,4 +194,39 @@ enum WindowFocus {
         }
         return Outcome(decision: .ignoreNoFocusedWindow, clearPending: pending != nil)
     }
+
+    /// What an Accessibility focused-window-changed event from the observed
+    /// app should do to the history. These events cover focus moving within
+    /// one app, for example ⌘`, a click on a sibling window, or a new window.
+    static func onFocusedWindowChanged(
+        pid: pid_t,
+        windowID: CGWindowID,
+        frontmostPID: pid_t?,
+        pending: PendingCommit?,
+        now: Double
+    ) -> Outcome {
+        let pendingExpired = pending.map { !$0.isLive(at: now) } ?? false
+
+        // The observer is retargeted on activation, so an event from an app
+        // that is no longer frontmost was queued before the switch.
+        if let frontmostPID, frontmostPID != pid {
+            return Outcome(decision: .ignoreStale, clearPending: pendingExpired)
+        }
+        if let pending, pending.isLive(at: now) {
+            // While a switch we asked for is settling, the only event that
+            // counts is the committed window gaining focus. That covers two
+            // cases:
+            //   * the target app can report its previous window before it
+            //     processes the raise;
+            //   * the app being left can still be frontmost for a moment and
+            //     emit events of its own.
+            // A real external switch in this window still gets through. Its
+            // didActivate notification clears the pending commit.
+            if pending.pid == pid, windowID == pending.windowID {
+                return Outcome(decision: .promote(windowID), clearPending: true)
+            }
+            return Outcome(decision: .ignoreStale, clearPending: false)
+        }
+        return Outcome(decision: .promote(windowID), clearPending: pending != nil)
+    }
 }

@@ -41,7 +41,21 @@ final class WindowOrderManager {
     /// Monotonic time, the same clock `PendingCommit` deadlines use.
     private var now: Double { ProcessInfo.processInfo.systemUptime }
 
-    init() {
+    /// Watches the frontmost app for focus moving between its own windows
+    /// (⌘`, clicks, new windows). macOS sends no workspace notification for
+    /// that.
+    private lazy var focusObserver = FocusObserver { [weak self] pid, windowID in
+        self?.focusedWindowDidChange(pid: pid, windowID: windowID)
+    }
+
+    private var isStarted = false
+
+    /// Begins observing. `SwitcherController` calls this once the event tap
+    /// is live, which also means Accessibility has been granted.
+    func start() {
+        guard !isStarted else { return }
+        isStarted = true
+
         // Seed from the current front-to-back z-order.
         _ = history.arrange(visible: WindowEnumerator.currentWindows().map(\.id))
 
@@ -51,10 +65,29 @@ final class WindowOrderManager {
             name: NSWorkspace.didActivateApplicationNotification,
             object: nil
         )
+        observeFocus(of: NSWorkspace.shared.frontmostApplication?.processIdentifier)
+    }
+
+    func stop() {
+        guard isStarted else { return }
+        isStarted = false
+        NSWorkspace.shared.notificationCenter.removeObserver(self)
+        focusObserver.stopObserving()
+        pending = nil
     }
 
     deinit {
         NSWorkspace.shared.notificationCenter.removeObserver(self)
+    }
+
+    /// Points the focus observer at `pid`, or stops it when the frontmost app
+    /// is unknown or is this app, whose windows are never listed.
+    private func observeFocus(of pid: pid_t?) {
+        if let pid, pid != getpid() {
+            focusObserver.observe(pid: pid)
+        } else {
+            focusObserver.stopObserving()
+        }
     }
 
     /// Returns the on-screen windows in the configured order, and sets
@@ -153,6 +186,22 @@ final class WindowOrderManager {
 
         if case .promote(let id) = outcome.decision {
             promote(id, source: "didActivate")
+        }
+        // Follow whichever app is really frontmost now. For a stale
+        // notification, that is not the app it names.
+        observeFocus(of: frontmost ?? pid)
+    }
+
+    /// The observed app moved keyboard focus to another of its windows.
+    private func focusedWindowDidChange(pid: pid_t, windowID: CGWindowID) {
+        let frontmost = NSWorkspace.shared.frontmostApplication?.processIdentifier
+        let outcome = WindowFocus.onFocusedWindowChanged(
+            pid: pid, windowID: windowID, frontmostPID: frontmost, pending: pending, now: now
+        )
+        if outcome.clearPending { pending = nil }
+        MRULog.info("focusChanged pid=\(pid) window=\(MRULog.describe(windowID)) decision=\(outcome.decision) clearPending=\(outcome.clearPending)")
+        if case .promote(let id) = outcome.decision {
+            promote(id, source: "focusChanged")
         }
     }
 
