@@ -3,7 +3,7 @@ import Darwin
 import Security
 import os
 
-private let log = Logger(subsystem: "com.example.windowswitcher", category: "identity")
+private let log = Logger(subsystem: AppBundle.logSubsystem, category: "identity")
 
 /// Facts about *this* running copy of the app: how it is code-signed and where
 /// it lives on disk.

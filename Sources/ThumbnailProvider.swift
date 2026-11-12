@@ -2,7 +2,7 @@ import AppKit
 import ScreenCaptureKit
 import os
 
-private let log = Logger(subsystem: "com.example.windowswitcher", category: "thumbnails")
+private let log = Logger(subsystem: AppBundle.logSubsystem, category: "thumbnails")
 
 /// Renders downscaled preview images for windows using ScreenCaptureKit — the
 /// modern, non-deprecated capture API (macOS 14+).

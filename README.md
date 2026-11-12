@@ -168,9 +168,30 @@ for confirmation before changing anything, and leaves your settings alone.
 To clear the entries by hand instead:
 
 ```bash
-tccutil reset Accessibility com.example.windowswitcher
-tccutil reset ScreenCapture com.example.windowswitcher
+tccutil reset Accessibility com.endritbejta.windowswitcher
+tccutil reset ScreenCapture com.endritbejta.windowswitcher
 ```
+
+#### The bundle-id change
+
+Builds before this change used the placeholder id `com.example.windowswitcher`.
+The id is now `com.endritbejta.windowswitcher`. Because the id is part of the
+code identity that permissions are tied to, **every existing install must grant
+Accessibility (and Screen Recording, if used) once more** after upgrading.
+Afterwards, the System Settings list may show an old *Window Switcher* entry
+that no longer applies.
+
+- **Settings carry over.** On first launch, your shortcut, window order and
+  display preferences are copied from the old id.
+- **The old grant is detected.** The setup window offers **Reset Permissions &
+  Restart**. That repair, and `./reinstall.sh`, clear the entries for both the
+  new id and the old one.
+- **To clear the old entries by hand:**
+
+  ```bash
+  tccutil reset Accessibility com.example.windowswitcher
+  tccutil reset ScreenCapture com.example.windowswitcher
+  ```
 
 ### Diagnosing
 
@@ -181,7 +202,7 @@ The setup window's **Copy Details** button copies the bundle path, signing kind
 and designated requirement. The same facts are logged at every launch:
 
 ```bash
-log show --last 5m --predicate 'subsystem == "com.example.windowswitcher"' --info
+log show --last 5m --predicate 'subsystem == "com.endritbejta.windowswitcher"' --info
 ```
 
 `./build.sh` prints the identity on every build and warns when it differs from
@@ -193,8 +214,8 @@ To investigate the recently-used order going wrong, turn on the `mru` log
 (off by default, read live — no relaunch needed):
 
 ```bash
-defaults write com.example.windowswitcher debug.mruLogging -bool YES
-log stream --predicate 'subsystem == "com.example.windowswitcher" AND category == "mru"' --level info
+defaults write com.endritbejta.windowswitcher debug.mruLogging -bool YES
+log stream --predicate 'subsystem == "com.endritbejta.windowswitcher" AND category == "mru"' --level info
 ```
 
 Every open, selection, commit and app activation is logged with a millisecond
@@ -213,7 +234,7 @@ what actually has focus are prefixed `ANOMALY <kind>`:
   its windows was being raised.
 
 Turn it off again with
-`defaults delete com.example.windowswitcher debug.mruLogging`.
+`defaults delete com.endritbejta.windowswitcher debug.mruLogging`.
 
 ## Building from source
 
@@ -353,6 +374,7 @@ WindowSwitcher/
 │   └── main.swift               # Unit tests for the ordering rules (./build.sh test)
 └── Sources/
     ├── main.swift               # NSApplication bootstrap (accessory app)
+    ├── AppBundle.swift          # Bundle id constants + one-time settings migration from the old id
     ├── AppDelegate.swift        # Lifecycle, menu bar, permission gating, relaunch
     ├── AppIcon.swift            # Menu-bar glyph + app icon artwork (one source)
     ├── AppSettings.swift        # Persisted, rebindable shortcut

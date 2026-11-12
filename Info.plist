@@ -9,7 +9,7 @@
 	<key>CFBundleExecutable</key>
 	<string>WindowSwitcher</string>
 	<key>CFBundleIdentifier</key>
-	<string>com.example.windowswitcher</string>
+	<string>com.endritbejta.windowswitcher</string>
 	<key>CFBundleVersion</key>
 	<string>1.0</string>
 	<key>CFBundleShortVersionString</key>

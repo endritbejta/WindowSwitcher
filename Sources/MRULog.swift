@@ -5,11 +5,11 @@ import os
 ///
 /// Turn on with
 ///
-///     defaults write com.example.windowswitcher debug.mruLogging -bool YES
+///     defaults write com.endritbejta.windowswitcher debug.mruLogging -bool YES
 ///
 /// and watch with
 ///
-///     log stream --predicate 'subsystem == "com.example.windowswitcher" AND category == "mru"' --level info
+///     log stream --predicate 'subsystem == "com.endritbejta.windowswitcher" AND category == "mru"' --level info
 ///
 /// The flag is read live, so neither step needs a relaunch. While it is off,
 /// every entry point returns before computing anything — in particular the
@@ -23,7 +23,7 @@ import os
 /// straight off the log.
 enum MRULog {
 
-    private static let log = Logger(subsystem: "com.example.windowswitcher", category: "mru")
+    private static let log = Logger(subsystem: AppBundle.logSubsystem, category: "mru")
 
     static var isEnabled: Bool { UserDefaults.standard.bool(forKey: "debug.mruLogging") }
 

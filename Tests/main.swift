@@ -695,6 +695,50 @@ test("property: random event streams never leave a gesture active with the modif
     check(cycles > 0 && commits > 0, "stream didn't exercise the machine (cycles \(cycles), commits \(commits))")
 }
 
+// MARK: - LegacyDefaultsMigration (Sources/AppBundle.swift)
+//
+// These test the pure `plan` step. They never read or write real
+// preferences.
+
+print("\nSettings migration tests")
+
+func plan(done: Bool = false, legacy: [String: Any]?, existing: Set<String> = []) -> LegacyDefaultsMigration.Plan {
+    LegacyDefaultsMigration.plan(alreadyDone: done, legacy: legacy, hasValue: { existing.contains($0) })
+}
+
+test("copies every old setting the new domain doesn't have, and marks done") {
+    let p = plan(legacy: ["switch.modifier": "option", "lastSeenDesignatedRequirement": "dr-old"])
+    equal(Set(p.copy.keys), ["switch.modifier", "lastSeenDesignatedRequirement"],
+          "the identity record must carry over so AppIdentity sees the change")
+    equal(p.copy["switch.modifier"] as? String, "option")
+    check(p.markDone)
+}
+
+test("never overwrites a setting already made under the new id") {
+    let p = plan(legacy: ["switch.modifier": "option", "switch.triggerKey": "grave"], existing: ["switch.modifier"])
+    equal(Set(p.copy.keys), ["switch.triggerKey"])
+}
+
+test("runs once: when already done, nothing is copied or written") {
+    let p = plan(done: true, legacy: ["switch.triggerKey": "grave"])
+    check(p.copy.isEmpty && !p.markDone)
+}
+
+test("a Mac that never ran the old id still marks done, so the check isn't repeated") {
+    let p = plan(legacy: nil)
+    check(p.copy.isEmpty && p.markDone)
+}
+
+test("the completion flag itself is never copied from the old domain") {
+    let p = plan(legacy: [LegacyDefaultsMigration.completedKey: true, "switch.modifier": "option"])
+    equal(Set(p.copy.keys), ["switch.modifier"])
+}
+
+test("the app's identifiers differ and the legacy one is the old placeholder") {
+    check(AppBundle.identifier != AppBundle.legacyIdentifier)
+    equal(AppBundle.legacyIdentifier, "com.example.windowswitcher")
+}
+
 // MARK: - Summary
 
 print(failures == 0 ? "\nAll \(checks) checks passed." : "\n\(failures) of \(checks) checks FAILED.")

@@ -21,7 +21,10 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
-BUNDLE_ID="com.example.windowswitcher"
+BUNDLE_ID="com.endritbejta.windowswitcher"
+# Every build before the rename used this placeholder id. Copies and grants
+# under it are what an upgrading Mac is most likely to have lying around.
+LEGACY_BUNDLE_ID="com.example.windowswitcher"
 ASSUME_YES=0
 for arg in "$@"; do
 	case "$arg" in
@@ -52,7 +55,9 @@ while IFS= read -r path; do
 	FOUND+=("$path")
 done < <(
 	{
-		mdfind "kMDItemCFBundleIdentifier == '$BUNDLE_ID'" 2>/dev/null || true
+		for id in "$BUNDLE_ID" "$LEGACY_BUNDLE_ID"; do
+			mdfind "kMDItemCFBundleIdentifier == '$id'" 2>/dev/null || true
+		done
 		for dir in /Applications "$HOME/Applications" "$HOME/Downloads" "$HOME/Desktop"; do
 			[ -d "$dir" ] && find "$dir" -maxdepth 2 -name "WindowSwitcher.app" -print 2>/dev/null || true
 		done
@@ -71,6 +76,7 @@ if [ "${#FOUND[@]}" -gt 0 ]; then
 	echo "  * delete the ${#FOUND[@]} app copy/copies listed above"
 fi
 echo "  * clear this Mac's Accessibility and Screen Recording entries for $BUNDLE_ID"
+echo "    and for the pre-rename id $LEGACY_BUNDLE_ID"
 echo "  * rebuild and install a fresh copy into /Applications, then launch it"
 echo "  * leave your shortcut settings alone"
 echo
@@ -105,10 +111,18 @@ for service in Accessibility ScreenCapture; do
 		echo "       Open System Settings > Privacy & Security > ${service}, select every"
 		echo "       WindowSwitcher row, and remove it with the '-' button before continuing."
 	fi
+	# Best effort: there is nothing to clear on a Mac that never ran a
+	# pre-rename build, so a failure here is not worth a warning.
+	tccutil reset "$service" "$LEGACY_BUNDLE_ID" >/dev/null 2>&1 \
+		&& echo "    cleared $service (pre-rename id)" || true
 done
 
 # Forget the recorded identity so the fresh install treats this as a first run.
-defaults delete "$BUNDLE_ID" lastSeenDesignatedRequirement >/dev/null 2>&1 || true
+# Both domains, so the first-launch settings migration can't bring the old
+# identity back.
+for id in "$BUNDLE_ID" "$LEGACY_BUNDLE_ID"; do
+	defaults delete "$id" lastSeenDesignatedRequirement >/dev/null 2>&1 || true
+done
 
 echo "==> Building and installing"
 "$ROOT/build.sh" install
@@ -132,6 +146,6 @@ Now grant the permission once, on a clean slate:
 The switcher becomes active as soon as Accessibility is granted. If it still is
 not recognised, run ./build.sh doctor and check the launch diagnostics:
 
-  log show --last 5m --predicate 'subsystem == "com.example.windowswitcher"' --info
+  log show --last 5m --predicate 'subsystem == "com.endritbejta.windowswitcher"' --info
 
 MSG

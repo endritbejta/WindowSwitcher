@@ -24,7 +24,7 @@ BUILD_DIR="$ROOT/build"
 APP="$BUILD_DIR/WindowSwitcher.app"
 MACOS_DIR="$APP/Contents/MacOS"
 EXECUTABLE="$MACOS_DIR/WindowSwitcher"
-BUNDLE_ID="com.example.windowswitcher"
+BUNDLE_ID="com.endritbejta.windowswitcher"
 
 CERT_CN="WindowSwitcher Self-Signed"
 SIGN_KEYCHAIN="$HOME/Library/Keychains/windowswitcher-signing.keychain-db"
@@ -71,6 +71,7 @@ if [[ "$COMMAND" == "test" ]]; then
 	swiftc -O -target "$(uname -m)-apple-macos14.0" \
 		-o "$BUILD_DIR/UnitTests" \
 		"$ROOT/Sources/WindowHistory.swift" "$ROOT/Sources/GestureTracker.swift" \
+		"$ROOT/Sources/AppBundle.swift" \
 		"$ROOT/Tests/main.swift"
 	echo "==> Running tests"
 	exec "$BUILD_DIR/UnitTests"
@@ -80,6 +81,18 @@ fi
 # ScreenCaptureKit screenshot API used to render window previews.
 ARCH="$(uname -m)"
 TARGET="${ARCH}-apple-macos14.0"
+
+# The bundle id is written in three places, and all three must agree: the
+# signature, Info.plist, and the Swift constant that names the log subsystem.
+# A mismatch would produce an app whose permission grants and logs go under
+# different identities, so it fails the build here rather than surfacing
+# later as a permissions mystery.
+PLIST_ID="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$ROOT/Info.plist")"
+SWIFT_ID="$(sed -n 's/^ *static let identifier = "\(.*\)"$/\1/p' "$ROOT/Sources/AppBundle.swift")"
+if [[ "$PLIST_ID" != "$BUNDLE_ID" || "$SWIFT_ID" != "$BUNDLE_ID" ]]; then
+	echo "error: bundle id mismatch — build.sh: $BUNDLE_ID, Info.plist: $PLIST_ID, AppBundle.swift: $SWIFT_ID" >&2
+	exit 1
+fi
 
 echo "==> Compiling ($TARGET)"
 rm -rf "$APP"
