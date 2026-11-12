@@ -71,6 +71,27 @@ enum WindowActivator {
         return wid
     }
 
+    /// The CGWindowIDs of every window `pid` reports through Accessibility
+    /// (`kAXWindowsAttribute`), or nil if the app can't be asked: Accessibility
+    /// isn't granted, the id helper is missing, or the call fails or times out.
+    ///
+    /// `WindowFilter` uses this to recognise windows the window server lists
+    /// but the app doesn't own as windows, such as the toolbar strip of a
+    /// full-screen app.
+    static func accessibleWindowIDs(forPID pid: pid_t) -> Set<CGWindowID>? {
+        guard getWindowID != nil else { return nil }
+        _ = configureMessagingTimeout
+        let appElement = AXUIElementCreateApplication(pid)
+        // Runs while the switcher opens, on the main thread; see `focusQueryTimeout`.
+        AXUIElementSetMessagingTimeout(appElement, focusQueryTimeout)
+        var value: CFTypeRef?
+        guard
+            AXUIElementCopyAttributeValue(appElement, kAXWindowsAttribute as CFString, &value) == .success,
+            let windows = value as? [AXUIElement]
+        else { return nil }
+        return Set(windows.compactMap(windowID(of:)))
+    }
+
     /// Upper bound, in seconds, on any single Accessibility call this app
     /// makes. AX's default is several seconds per call. All of these calls
     /// run on the main thread, which also services the key-event tap, so one

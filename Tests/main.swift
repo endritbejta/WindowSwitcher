@@ -908,6 +908,41 @@ test("the app's identifiers differ and the legacy one is the old placeholder") {
     equal(AppBundle.legacyIdentifier, "com.example.windowswitcher")
 }
 
+// MARK: - WindowFilter (Sources/WindowFilter.swift)
+
+print("\nWindow filter tests")
+
+let calendarPID: pid_t = 115, chromePID: pid_t = 99478
+
+test("full-screen toolbar strip is dropped; the app's real window stays") {
+    // Calendar full screen: its window 10 plus the toolbar strip 11, which
+    // Accessibility doesn't report.
+    let kept = WindowFilter.listed([(10, calendarPID), (11, calendarPID), (20, chromePID)]) { pid in
+        pid == calendarPID ? [10] : nil
+    }
+    equal(kept, [10, 20])
+}
+
+test("an app with one candidate is never asked") {
+    var asked: [pid_t] = []
+    let kept = WindowFilter.listed([(10, calendarPID), (20, chromePID), (21, chromePID)]) { pid in
+        asked.append(pid); return [20, 21]
+    }
+    equal(kept, [10, 20, 21])
+    equal(asked, [chromePID])
+}
+
+test("no answer, an empty answer, or an answer matching nothing keeps everything") {
+    let all: [(id: CGWindowID, pid: pid_t)] = [(10, calendarPID), (11, calendarPID)]
+    equal(WindowFilter.listed(all) { _ in nil }, [10, 11])
+    equal(WindowFilter.listed(all) { _ in [] }, [10, 11])
+    equal(WindowFilter.listed(all) { _ in [99] }, [10, 11])
+}
+
+test("several real windows of one app all stay") {
+    equal(WindowFilter.listed([(20, chromePID), (21, chromePID), (22, chromePID)]) { _ in [20, 21, 22, 30] }, [20, 21, 22])
+}
+
 // MARK: - Summary
 
 print(failures == 0 ? "\nAll \(checks) checks passed." : "\n\(failures) of \(checks) checks FAILED.")

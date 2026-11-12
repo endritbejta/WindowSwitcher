@@ -62,7 +62,14 @@ enum WindowEnumerator {
             guard let info = makeWindowInfo(from: dict, appsByPID: appsByPID, displays: displays) else { continue }
             result.append(info)
         }
-        return result
+
+        // A full-screen app's toolbar strip passes every check above, so it
+        // would be listed as a second window with a blank preview.
+        let listed = WindowFilter.listed(
+            result.map { (id: $0.id, pid: $0.pid) },
+            accessibleWindows: WindowActivator.accessibleWindowIDs(forPID:)
+        )
+        return result.filter { listed.contains($0.id) }
     }
 
     /// Ids of every window that still exists, on screen or not. That includes
