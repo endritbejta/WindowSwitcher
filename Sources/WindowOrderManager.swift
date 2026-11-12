@@ -100,6 +100,8 @@ final class WindowOrderManager {
         let visible = WindowEnumerator.currentWindows()
         let before = state.history.order
         let pendingAtOpen = state.pending
+        // Read once, so both answers below describe the same moment.
+        let frontmostPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
 
         let opened = state.open(
             visible: visible.map(\.id),
@@ -108,11 +110,15 @@ final class WindowOrderManager {
             // can't be read, nothing is forgotten, rather than risk wiping
             // the history.
             existing: WindowEnumerator.existingWindowIDs(),
+            // `visible` is front-to-back, so the first match is the frontmost
+            // app's front window. That is what the user is looking at, even
+            // when the app reports a different window as focused.
+            frontmostAppFront: frontmostPID.flatMap { pid in visible.first { $0.pid == pid }?.id },
             recentlyUsed: isRecentlyUsed,
             now: now
         ) {
             WindowFocus.systemFocused(
-                frontmostPID: NSWorkspace.shared.frontmostApplication?.processIdentifier,
+                frontmostPID: frontmostPID,
                 ownPID: getpid(),
                 visible: visible.map { (id: $0.id, pid: $0.pid) },
                 axFocused: WindowActivator.focusedWindowID(forPID:)
@@ -208,10 +214,9 @@ final class WindowOrderManager {
         let focus = MRULog.actualFocus()
         let order = state.history.order
         let dropped = before.filter { !order.contains($0) }
-        let source = opened.current == nil ? "none" : (opened.currentFromPending ? "pending" : "system")
         MRULog.info(
             "open mode=\(AppSettings.shared.windowOrder.rawValue)"
-            + " current=\(MRULog.describe(opened.current)) source=\(source)"
+            + " current=\(MRULog.describe(opened.current)) source=\(opened.source.rawValue)"
             + " pending=\(pendingAtOpen.map { "\(MRULog.describe($0.windowID)) live=\($0.isLive(at: now))" } ?? "nil")"
             + " zFront=\(MRULog.describe(zFront))"
             + " systemFocused=\(MRULog.describe(focus?.windowID)) frontmostApp=\(focus.map { "\($0.pid)(\($0.app))" } ?? "nil")"
@@ -224,8 +229,9 @@ final class WindowOrderManager {
         if let focused = focus?.windowID, focused != zFront {
             MRULog.info("zorder-lag zFront=\(MRULog.describe(zFront)) systemFocused=\(MRULog.describe(focused))")
         }
-        if opened.currentFromPending, let focused = focus?.windowID, focused != opened.current {
-            MRULog.info("system still settling: using pending \(MRULog.describe(opened.current)), system reports \(MRULog.describe(focused))")
+        if opened.source == .pending || opened.source == .lastCommit,
+           let focused = focus?.windowID, focused != opened.current {
+            MRULog.info("using \(opened.source.rawValue) \(MRULog.describe(opened.current)) over system-reported \(MRULog.describe(focused))")
         }
 
         // The one ordering invariant. In recently-used mode the current

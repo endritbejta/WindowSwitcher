@@ -126,6 +126,11 @@ struct WindowOrderState {
 
     private(set) var history: WindowHistory
     private(set) var pending: PendingCommit?
+    /// The last window chosen through the switcher. It outlives `pending`'s
+    /// one-second lifetime, and is dropped as soon as any other window is
+    /// promoted, which means the user went somewhere else. See
+    /// `WindowFocus.current` for why it is kept.
+    private(set) var lastCommit: PendingCommit?
 
     init(seed: [CGWindowID] = []) {
         history = WindowHistory()
@@ -137,29 +142,35 @@ struct WindowOrderState {
         let ordered: [CGWindowID]
         /// The window the pre-selection is anchored on.
         let current: CGWindowID?
-        /// True when `current` came from the switcher's own settling commit
-        /// rather than from asking the system.
-        let currentFromPending: Bool
+        /// Which rule in `WindowFocus.current` produced `current`.
+        let source: WindowFocus.Source
     }
 
     /// The switcher is opening. Resolves the current window, then updates and
     /// returns the order.
+    ///
+    /// - `frontmostAppFront`: the frontmost app's front-most listed window by
+    ///   z-order, or nil if it lists none.
     mutating func open(
         visible: [CGWindowID],
         existing: Set<CGWindowID>?,
+        frontmostAppFront: CGWindowID?,
         recentlyUsed: Bool,
         now: Double,
         systemFocused: () -> CGWindowID?
     ) -> Opened {
-        var askedSystem = false
-        let current = WindowFocus.current(pending: pending, now: now, visible: Set(visible)) {
-            askedSystem = true
-            return systemFocused()
-        }
+        let (current, source) = WindowFocus.current(
+            pending: pending,
+            lastCommit: lastCommit,
+            frontmostAppFront: frontmostAppFront,
+            now: now,
+            visible: Set(visible),
+            systemFocused: systemFocused
+        )
         let ordered = history.prepareOpen(
             visible: visible, existing: existing, current: current, recentlyUsed: recentlyUsed
         )
-        return Opened(ordered: ordered, current: current, currentFromPending: current != nil && !askedSystem)
+        return Opened(ordered: ordered, current: current, source: source)
     }
 
     /// The user chose `windowID` in the switcher, and macOS is about to be
@@ -174,6 +185,7 @@ struct WindowOrderState {
         let activeBefore = settling?.pid ?? frontmostPID
         pending = PendingCommit(pid: pid, windowID: windowID, now: now,
                                 expectsActivation: activeBefore != pid)
+        lastCommit = pending
         if recentlyUsed { history.promote(windowID) }
     }
 
@@ -202,39 +214,66 @@ struct WindowOrderState {
         return outcome
     }
 
-    /// Observation stopped. Forget any commit still settling.
-    mutating func clearPending() { pending = nil }
+    /// Observation stopped. Forget every commit, settling or not.
+    mutating func clearPending() {
+        pending = nil
+        lastCommit = nil
+    }
 
     private mutating func apply(_ outcome: WindowFocus.Outcome, recentlyUsed: Bool) {
         if outcome.clearPending { pending = nil }
-        if recentlyUsed, case .promote(let id) = outcome.decision { history.promote(id) }
+        guard case .promote(let id) = outcome.decision else { return }
+        // Any other window gaining focus means the user moved on, so the
+        // last commit no longer says anything about where they are.
+        if id != lastCommit?.windowID { lastCommit = nil }
+        if recentlyUsed { history.promote(id) }
     }
 }
 
 enum WindowFocus {
 
+    /// Where `current` came from, for diagnostics.
+    enum Source: String, Equatable {
+        case pending, lastCommit, system, none
+    }
+
     /// The window to treat as current when the switcher opens.
     ///
     /// The precedence is:
-    ///   1. a live commit we just issued,
-    ///   2. the system's focused window (see `systemFocused`).
+    ///   1. **A live commit we just issued.** Everything the system reports
+    ///      lags for a moment after an activation.
+    ///   2. **The last window chosen through the switcher**, while it is
+    ///      still the frontmost app's front window and nothing else has
+    ///      gained focus since. Some apps, Calendar for one, raise a window
+    ///      when asked but leave keyboard focus on another of their windows,
+    ///      and report that other one as focused indefinitely. The user is
+    ///      looking at the raised window. Trusting the app's report made a
+    ///      quick tap re-select the window already on screen, and pushed the
+    ///      genuinely previous window down the list. Being in front and
+    ///      untouched since is evidence the switch held.
+    ///   3. **The system's focused window** (see `systemFocused`).
     ///
-    /// Either answer counts only if that window is in the visible list.
+    /// Every answer counts only if that window is in the visible list.
     /// `systemFocused` is a closure so the Accessibility round trip only
     /// happens when it is needed.
     static func current(
         pending: PendingCommit?,
+        lastCommit: PendingCommit? = nil,
+        frontmostAppFront: CGWindowID? = nil,
         now: Double,
         visible: Set<CGWindowID>,
         systemFocused: () -> CGWindowID?
-    ) -> CGWindowID? {
+    ) -> (CGWindowID?, Source) {
         if let pending, pending.isLive(at: now), visible.contains(pending.windowID) {
-            return pending.windowID
+            return (pending.windowID, .pending)
+        }
+        if let lastCommit, lastCommit.windowID == frontmostAppFront, visible.contains(lastCommit.windowID) {
+            return (lastCommit.windowID, .lastCommit)
         }
         if let id = systemFocused(), visible.contains(id) {
-            return id
+            return (id, .system)
         }
-        return nil
+        return (nil, .none)
     }
 
     /// The system's answer to "which listed window has focus?"

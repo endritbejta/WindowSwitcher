@@ -84,6 +84,7 @@ struct Driver {
         let opened = state.open(
             visible: vis.map(\.id),
             existing: Set(windows.map(\.id)).subtracting(closed),
+            frontmostAppFront: front.flatMap { pid in vis.first { $0.pid == pid }?.id },
             recentlyUsed: recentlyUsed,
             now: now
         ) {
@@ -136,13 +137,19 @@ struct Driver {
     /// The system finishes carrying out a switch to `id`. Activation is
     /// posted only when the app changes; same-app switches post an AX focus
     /// event instead.
-    mutating func systemSettles(on id: CGWindowID, notify: Bool = true) {
+    ///
+    /// The window is raised to the front of the z-order. With
+    /// `focusFollows: false` the app behaves like Calendar: it raises the
+    /// window but keeps reporting (and posting) its previous window as
+    /// focused.
+    mutating func systemSettles(on id: CGWindowID, notify: Bool = true, focusFollows: Bool = true) {
         let p = pid(of: id)
         let changedApp = frontmostPID != p
         frontmostPID = p
-        axFocused[p] = id
+        if let i = windows.firstIndex(where: { $0.id == id }) { windows.insert(windows.remove(at: i), at: 0) }
+        if focusFollows { axFocused[p] = id }
         guard notify else { return }
-        if changedApp { activation(p) } else { focusChanged(p, to: id) }
+        if changedApp { activation(p) } else if focusFollows { focusChanged(p, to: id) }
     }
 
     /// A quick tap (press and release) that is allowed to settle before the
@@ -241,22 +248,22 @@ test("initialSelection: single window and empty list are safe") {
 test("a live pending commit beats the system and skips the AX query") {
     var asked = false
     let p = PendingCommit(pid: 20, windowID: B, now: 10)
-    let id = WindowFocus.current(pending: p, now: 10.2, visible: [A, B]) { asked = true; return A }
-    equal(id, B); check(!asked, "system should not be queried")
+    let (id, source) = WindowFocus.current(pending: p, now: 10.2, visible: [A, B]) { asked = true; return A }
+    equal(id, B); equal(source, .pending); check(!asked, "system should not be queried")
 }
 
 test("an expired pending commit defers to the system") {
     let p = PendingCommit(pid: 20, windowID: B, now: 10)
-    equal(WindowFocus.current(pending: p, now: 10 + PendingCommit.lifetime + 0.01, visible: [A, B]) { A }, A)
+    equal(WindowFocus.current(pending: p, now: 10 + PendingCommit.lifetime + 0.01, visible: [A, B]) { A }.0, A)
 }
 
 test("a pending commit whose window vanished defers to the system") {
     let p = PendingCommit(pid: 20, windowID: B, now: 10)
-    equal(WindowFocus.current(pending: p, now: 10.1, visible: [A]) { A }, A)
+    equal(WindowFocus.current(pending: p, now: 10.1, visible: [A]) { A }.0, A)
 }
 
 test("a system-focused window that isn't listed gives no current window") {
-    equal(WindowFocus.current(pending: nil, now: 0, visible: [A, B]) { 42 }, nil)
+    equal(WindowFocus.current(pending: nil, now: 0, visible: [A, B]) { 42 }.0, nil)
 }
 
 // MARK: - WindowFocus.onActivation
@@ -506,6 +513,104 @@ test("a click on another app right after a same-app switch is recorded") {
     d.activation(10)
     equal(d.history.order.first, T, "must not be dropped as stale: no activation of ours was coming")
     check(d.pending == nil)
+}
+
+// MARK: Apps that raise a window but keep focus on another (seen with Calendar)
+//
+// Replays the first on-device log. From Claude, the user switched to one of
+// two Calendar windows. Calendar raised it but kept reporting its other
+// window as focused, so quick taps bounced between the two Calendar windows
+// and Claude, the genuinely previous window, sank to third place.
+
+let T: CGWindowID = 1, K1: CGWindowID = 2, K2: CGWindowID = 3
+func calendarSetup() -> Driver {
+    // Claude T (pid 10) in front; Calendar K1 (focused within Calendar) and K2 (pid 20).
+    Driver([Win(id: T, pid: 10), Win(id: K1, pid: 20), Win(id: K2, pid: 20)], focused: T)
+}
+
+test("switching to a raised-but-not-focused window: a quick tap goes back, not sideways") {
+    var d = calendarSetup()
+    d.commit(K2)
+    d.now += 0.04
+    d.systemSettles(on: K2, focusFollows: false)   // K2 in front, Calendar still says K1
+    d.now += 0.2                                     // the activation already arrived
+    let r = d.open()
+    equal(r.current, K2, "the user is looking at K2")
+    equal(r.selected, T, "previously this was K2 again: the window already on screen")
+}
+
+test("…and it still holds long after the pending lifetime") {
+    var d = calendarSetup()
+    d.commit(K2); d.now += 0.04
+    d.systemSettles(on: K2, focusFollows: false)
+    d.now += 30
+    let r = d.open()
+    equal(r.current, K2)
+    equal(r.list, [K2, T, K1])
+    equal(r.selected, T)
+}
+
+test("…and repeated quick taps toggle between the two most recent windows") {
+    var d = calendarSetup()
+    var seen: [CGWindowID] = []
+    for _ in 0..<6 {
+        let s = d.open().selected
+        d.commit(s); d.now += 0.04
+        // Calendar never moves focus to K2; everything else behaves normally.
+        d.systemSettles(on: s, focusFollows: s != K2)
+        d.now += 0.4
+        seen.append(s)
+    }
+    equal(seen, [K1, T, K1, T, K1, T], "starting from T, the most recent other window is K1")
+    var d2 = calendarSetup()
+    d2.commit(K2); d2.now += 0.04; d2.systemSettles(on: K2, focusFollows: false); d2.now += 0.4
+    var seen2: [CGWindowID] = []
+    for _ in 0..<6 {
+        let s = d2.open().selected
+        d2.commit(s); d2.now += 0.04
+        d2.systemSettles(on: s, focusFollows: s != K2)
+        d2.now += 0.4
+        seen2.append(s)
+    }
+    equal(seen2, [T, K2, T, K2, T, K2], "from K2, taps alternate K2 ↔ T, never K1")
+}
+
+test("the last commit stops counting once another window of the app comes to the front") {
+    var d = calendarSetup()
+    d.commit(K2); d.now += 0.04
+    d.systemSettles(on: K2, focusFollows: false)
+    d.now += 2
+    // User clicks K1. Calendar already reported K1 as focused, so no AX event.
+    d.systemSettles(on: K1, notify: false)
+    let r = d.open()
+    equal(r.current, K1)
+    equal(r.selected, K2)
+}
+
+test("the last commit stops counting once the user switches to another app") {
+    var d = calendarSetup()
+    d.commit(K2); d.now += 0.04
+    d.systemSettles(on: K2, focusFollows: false)
+    d.now += 2
+    d.externalFocus(T)                       // click Claude
+    check(d.state.lastCommit == nil, "an external promotion drops it")
+    d.now += 2
+    d.frontmostPID = 20                      // Dock click back to Calendar: K2 still its front window
+    d.activation(20)                         // Calendar reports K1
+    let r = d.open()
+    equal(r.current, K1, "after an external switch, the app's own report is used again")
+}
+
+test("current(): lastCommit counts only while it is the frontmost app's front window") {
+    let last = PendingCommit(pid: 20, windowID: K2, now: 0)
+    var asked = false
+    let (id, src) = WindowFocus.current(pending: nil, lastCommit: last, frontmostAppFront: K2,
+                                        now: 50, visible: [T, K1, K2]) { asked = true; return K1 }
+    equal(id, K2); equal(src, .lastCommit); check(!asked, "no AX round trip needed")
+    equal(WindowFocus.current(pending: nil, lastCommit: last, frontmostAppFront: K1,
+                              now: 50, visible: [T, K1, K2]) { K1 }.1, .system)
+    equal(WindowFocus.current(pending: nil, lastCommit: last, frontmostAppFront: K2,
+                              now: 50, visible: [T, K1]) { K1 }.1, .system, "closed since")
 }
 
 test("fixed mode: tiles never move, a tap walks to the next tile") {
