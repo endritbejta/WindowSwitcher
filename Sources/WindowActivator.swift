@@ -85,6 +85,14 @@ enum WindowActivator {
         AXUIElementSetMessagingTimeout(AXUIElementCreateSystemWide(), messagingTimeout)
     }()
 
+    /// Applies the process-wide Accessibility timeout. `SwitcherController`
+    /// calls this before anything else talks to another app, including
+    /// `FocusObserver`'s registration at startup. Calling it again does
+    /// nothing. The calls inside this type also apply it, as a backstop.
+    static func installMessagingTimeout() {
+        _ = configureMessagingTimeout
+    }
+
     /// Focus the given window. Safe to call from the main thread.
     static func activate(_ window: WindowInfo) {
         _ = configureMessagingTimeout

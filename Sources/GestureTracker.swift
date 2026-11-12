@@ -52,16 +52,20 @@ struct GestureTracker: Equatable {
             isActive = true
             return Result(swallow: true, action: .cycle(reverse: shiftHeld))
         }
+        // Escape always means "dismiss", even after a lost release. The
+        // overlay is still on screen, and a user reaching for Escape wants it
+        // gone without switching. So it is checked before the lost-release
+        // commit below, and swallowed, as in the normal case.
+        if keyCode == escapeKeyCode && isActive {
+            isActive = false
+            return Result(swallow: true, action: .cancel)
+        }
         // A gesture in progress with the modifier already up means its
         // release was lost. Commit as the release would have, and let this
         // key through, since it isn't part of the gesture.
         if isActive && !modifierHeld {
             isActive = false
             return Result(swallow: false, action: .commit)
-        }
-        if keyCode == escapeKeyCode && isActive {
-            isActive = false
-            return Result(swallow: true, action: .cancel)
         }
         return Result(swallow: false, action: nil)
     }

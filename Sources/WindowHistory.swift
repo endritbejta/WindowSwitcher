@@ -97,19 +97,118 @@ struct PendingCommit: Equatable {
     let pid: pid_t
     let windowID: CGWindowID
     let deadline: Double
+    /// Whether macOS will post a `didActivateApplication` for this commit.
+    /// It will unless the target app was already the active one, for example
+    /// when switching between two windows of the same app. Only a commit
+    /// that expects an activation can make another app's activation stale.
+    let expectsActivation: Bool
 
     /// How long a commit stays authoritative. That is long enough for a slow
     /// app to finish activating, and short enough that a later external
     /// switch is never overridden for long.
     static let lifetime: Double = 1.0
 
-    init(pid: pid_t, windowID: CGWindowID, now: Double) {
+    init(pid: pid_t, windowID: CGWindowID, now: Double, expectsActivation: Bool = true) {
         self.pid = pid
         self.windowID = windowID
         self.deadline = now + Self.lifetime
+        self.expectsActivation = expectsActivation
     }
 
     func isLive(at now: Double) -> Bool { now <= deadline }
+}
+
+/// Everything the switcher remembers about window order, and every
+/// transition that changes it. `WindowOrderManager` gathers the live inputs
+/// from macOS and calls these; the unit tests call exactly the same methods
+/// with scripted inputs. No AppKit, no Accessibility, no window server.
+struct WindowOrderState {
+
+    private(set) var history: WindowHistory
+    private(set) var pending: PendingCommit?
+
+    init(seed: [CGWindowID] = []) {
+        history = WindowHistory()
+        _ = history.arrange(visible: seed)
+    }
+
+    struct Opened: Equatable {
+        /// The visible windows in display order.
+        let ordered: [CGWindowID]
+        /// The window the pre-selection is anchored on.
+        let current: CGWindowID?
+        /// True when `current` came from the switcher's own settling commit
+        /// rather than from asking the system.
+        let currentFromPending: Bool
+    }
+
+    /// The switcher is opening. Resolves the current window, then updates and
+    /// returns the order.
+    mutating func open(
+        visible: [CGWindowID],
+        existing: Set<CGWindowID>?,
+        recentlyUsed: Bool,
+        now: Double,
+        systemFocused: () -> CGWindowID?
+    ) -> Opened {
+        var askedSystem = false
+        let current = WindowFocus.current(pending: pending, now: now, visible: Set(visible)) {
+            askedSystem = true
+            return systemFocused()
+        }
+        let ordered = history.prepareOpen(
+            visible: visible, existing: existing, current: current, recentlyUsed: recentlyUsed
+        )
+        return Opened(ordered: ordered, current: current, currentFromPending: current != nil && !askedSystem)
+    }
+
+    /// The user chose `windowID` in the switcher, and macOS is about to be
+    /// asked to activate it.
+    ///
+    /// - `frontmostPID`: the frontmost app as macOS reports it right now. It
+    ///   is used only to tell whether an activation will follow, and an
+    ///   earlier commit that is still settling takes precedence over it,
+    ///   because during rapid taps the reported frontmost app lags.
+    mutating func commit(pid: pid_t, windowID: CGWindowID, frontmostPID: pid_t?, recentlyUsed: Bool, now: Double) {
+        let settling = pending.flatMap { $0.isLive(at: now) ? $0 : nil }
+        let activeBefore = settling?.pid ?? frontmostPID
+        pending = PendingCommit(pid: pid, windowID: windowID, now: now,
+                                expectsActivation: activeBefore != pid)
+        if recentlyUsed { history.promote(windowID) }
+    }
+
+    /// An `NSWorkspace.didActivateApplication` notification for `notifiedPID`.
+    @discardableResult
+    mutating func activation(
+        notifiedPID: pid_t,
+        ownPID: pid_t,
+        recentlyUsed: Bool,
+        now: Double,
+        axFocused: () -> CGWindowID?
+    ) -> WindowFocus.Outcome {
+        let outcome = WindowFocus.onActivation(
+            notifiedPID: notifiedPID, ownPID: ownPID, pending: pending, now: now, axFocused: axFocused
+        )
+        apply(outcome, recentlyUsed: recentlyUsed)
+        return outcome
+    }
+
+    /// The observed app moved keyboard focus to `windowID`, one of its own
+    /// windows.
+    @discardableResult
+    mutating func focusChanged(pid: pid_t, windowID: CGWindowID, recentlyUsed: Bool, now: Double) -> WindowFocus.Outcome {
+        let outcome = WindowFocus.onFocusedWindowChanged(pid: pid, windowID: windowID, pending: pending, now: now)
+        apply(outcome, recentlyUsed: recentlyUsed)
+        return outcome
+    }
+
+    /// Observation stopped. Forget any commit still settling.
+    mutating func clearPending() { pending = nil }
+
+    private mutating func apply(_ outcome: WindowFocus.Outcome, recentlyUsed: Bool) {
+        if outcome.clearPending { pending = nil }
+        if recentlyUsed, case .promote(let id) = outcome.decision { history.promote(id) }
+    }
 }
 
 enum WindowFocus {
@@ -118,7 +217,7 @@ enum WindowFocus {
     ///
     /// The precedence is:
     ///   1. a live commit we just issued,
-    ///   2. the system's focused window (frontmost app, then Accessibility).
+    ///   2. the system's focused window (see `systemFocused`).
     ///
     /// Either answer counts only if that window is in the visible list.
     /// `systemFocused` is a closure so the Accessibility round trip only
@@ -138,54 +237,82 @@ enum WindowFocus {
         return nil
     }
 
+    /// The system's answer to "which listed window has focus?"
+    ///
+    /// It is the frontmost app's Accessibility focused window if that window
+    /// is listed. Otherwise (a palette or sheet is focused, or the app doesn't
+    /// support Accessibility) it is that app's front-most listed window. It is
+    /// nil when this app is frontmost, or the frontmost app lists nothing.
+    ///
+    /// - `visible`: front-to-back z-order.
+    static func systemFocused(
+        frontmostPID: pid_t?,
+        ownPID: pid_t,
+        visible: [(id: CGWindowID, pid: pid_t)],
+        axFocused: (pid_t) -> CGWindowID?
+    ) -> CGWindowID? {
+        guard let pid = frontmostPID, pid != ownPID else { return nil }
+        if let id = axFocused(pid), visible.contains(where: { $0.id == id }) {
+            return id
+        }
+        return visible.first(where: { $0.pid == pid })?.id
+    }
+
     enum Decision: Equatable {
         case promote(CGWindowID)
         case ignoreOwnApp
-        /// A newer activation has already happened, so this event is out of date.
+        /// It predates a switch the switcher has just made.
         case ignoreStale
         case ignoreNoFocusedWindow
     }
 
     struct Outcome: Equatable {
         let decision: Decision
-        /// Whether the pending commit is resolved or expired, and should be dropped.
+        /// Whether the pending commit is resolved or superseded, and should be dropped.
         let clearPending: Bool
     }
 
     /// What an `NSWorkspace.didActivateApplication` notification should do to
     /// the history.
     ///
-    /// - `frontmostPID`: the frontmost app at the time the notification is
-    ///   handled, not at the time it was posted.
+    /// Staleness is judged against the switcher's own pending commit, never
+    /// against `NSWorkspace.frontmostApplication`, whose update timing
+    /// relative to this notification isn't documented. macOS delivers
+    /// activation notifications in the order the activations happened. So
+    /// while a commit that expects its own activation is settling, any other
+    /// app's activation was caused before it, and is out of date.
+    ///
     /// - `axFocused`: the notified app's focused window according to
     ///   Accessibility. It is a closure because it costs an IPC round trip and
     ///   is only consulted for a genuine external switch.
     static func onActivation(
         notifiedPID: pid_t,
-        frontmostPID: pid_t?,
         ownPID: pid_t,
         pending: PendingCommit?,
         now: Double,
         axFocused: () -> CGWindowID?
     ) -> Outcome {
-        let pendingForThisApp = pending.map { $0.pid == notifiedPID && $0.isLive(at: now) } ?? false
-        let pendingExpired = pending.map { !$0.isLive(at: now) } ?? false
+        let settling = pending.flatMap { $0.isLive(at: now) ? $0 : nil }
 
         // The switcher's own Settings or Setup window coming forward. It is
         // never in the list, so it must not count as a switch.
         if notifiedPID == ownPID {
-            return Outcome(decision: .ignoreOwnApp, clearPending: pendingExpired)
+            return Outcome(decision: .ignoreOwnApp, clearPending: pending != nil && settling == nil)
         }
-        // Delivered after a newer activation. Promoting it would put a window
-        // that is no longer in front at the head of the history.
-        if let frontmostPID, frontmostPID != notifiedPID {
-            return Outcome(decision: .ignoreStale, clearPending: pendingExpired || pendingForThisApp)
-        }
-        // This is the activation we asked for. Accessibility may still report
-        // the app's previous window as focused (it hasn't processed the raise
-        // yet, or ignores it), so the window we committed takes precedence.
-        if let pending, pendingForThisApp {
-            return Outcome(decision: .promote(pending.windowID), clearPending: true)
+        if let settling {
+            // This is the activation we asked for. Accessibility may still
+            // report the app's previous window as focused (it hasn't
+            // processed the raise yet, or ignores it), so the window we
+            // committed takes precedence.
+            if settling.pid == notifiedPID {
+                return Outcome(decision: .promote(settling.windowID), clearPending: true)
+            }
+            // Our own activation hasn't arrived yet, so this one came before it.
+            if settling.expectsActivation {
+                return Outcome(decision: .ignoreStale, clearPending: false)
+            }
+            // The commit stayed inside the already-active app, so no
+            // activation of ours is coming. This is a real switch away from it.
         }
         // A real external switch (Dock, mouse click, another app's request).
         // Any pending commit is now superseded.
@@ -198,30 +325,24 @@ enum WindowFocus {
     /// What an Accessibility focused-window-changed event from the observed
     /// app should do to the history. These events cover focus moving within
     /// one app, for example ⌘`, a click on a sibling window, or a new window.
+    ///
+    /// `FocusObserver` only reports events from the app it currently
+    /// watches, and it is retargeted on every activation, so no frontmost
+    /// check is needed here.
     static func onFocusedWindowChanged(
         pid: pid_t,
         windowID: CGWindowID,
-        frontmostPID: pid_t?,
         pending: PendingCommit?,
         now: Double
     ) -> Outcome {
-        let pendingExpired = pending.map { !$0.isLive(at: now) } ?? false
-
-        // The observer is retargeted on activation, so an event from an app
-        // that is no longer frontmost was queued before the switch.
-        if let frontmostPID, frontmostPID != pid {
-            return Outcome(decision: .ignoreStale, clearPending: pendingExpired)
-        }
         if let pending, pending.isLive(at: now) {
             // While a switch we asked for is settling, the only event that
             // counts is the committed window gaining focus. That covers two
             // cases:
             //   * the target app can report its previous window before it
             //     processes the raise;
-            //   * the app being left can still be frontmost for a moment and
-            //     emit events of its own.
-            // A real external switch in this window still gets through. Its
-            // didActivate notification clears the pending commit.
+            //   * the app being left can emit a last event before the
+            //     observer moves on.
             if pending.pid == pid, windowID == pending.windowID {
                 return Outcome(decision: .promote(windowID), clearPending: true)
             }

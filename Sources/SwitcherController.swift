@@ -43,6 +43,10 @@ final class SwitcherController: HotKeyManagerDelegate {
         // Accessibility is granted, every query they make would fail, and
         // nothing could use the results.
         guard hotKeys.start() else { return false }
+        // Before the first Accessibility IPC. windowOrder.start() registers
+        // the focus observer, which would otherwise run with AX's
+        // multi-second default.
+        WindowActivator.installMessagingTimeout()
         windowOrder.start()
         return true
     }
@@ -101,15 +105,9 @@ final class SwitcherController: HotKeyManagerDelegate {
             + " anchor=\(anchor.map(String.init) ?? "absent") reverse=\(reverse)"
             + " list=\(MRULog.describe(windows.map(\.id)))"
         )
-        // An invariant. In recently-used mode the current window is promoted
-        // before the list is built, so the anchor can only be 0. If it is
-        // anything else, a quick tap won't land on the previous window.
-        if AppSettings.shared.windowOrder == .recentlyUsed, let anchor, anchor != 0 {
-            MRULog.anomaly(
-                "selection-anchor-not-head",
-                "anchor \(MRULog.describe(windowOrder.currentWindowID)) at index \(anchor)"
-            )
-        }
+        // The ordering invariant (current window heads the list) is checked
+        // once, as `head-not-current`, by WindowOrderManager, which owns
+        // that state.
     }
 
     private func logCommit(_ selected: WindowInfo) {

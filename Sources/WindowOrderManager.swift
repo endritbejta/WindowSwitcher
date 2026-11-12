@@ -11,8 +11,10 @@ import AppKit
 ///     closed windows removed, but existing windows never move.
 ///
 /// macOS keeps no per-window focus history, so the switcher builds its own.
-/// The rules live in `WindowHistory.swift`, where they are unit-tested; this
-/// class only gathers the live inputs for them:
+/// All of the state and every rule that changes it live in
+/// `WindowOrderState` (WindowHistory.swift), where the unit tests exercise
+/// that exact code. This class only does the I/O: it reads the window
+/// server, NSWorkspace and Accessibility, and feeds what it reads in:
 ///
 ///   1. **On open**, the window that is actually current is promoted. That is
 ///      the switcher's own just-issued commit if it is still settling,
@@ -24,11 +26,13 @@ import AppKit
 ///      so the app activation it causes promotes that window rather than
 ///      whatever Accessibility reports a moment too early.
 ///   3. **On external activation**, the app's focused window is promoted,
-///      unless the notification is stale or about this app's own windows.
+///      unless the notification predates a commit still settling or is about
+///      this app's own windows.
+///   4. **On focus moving inside the frontmost app**, reported by
+///      `FocusObserver`, that window is promoted.
 final class WindowOrderManager {
 
-    private var history = WindowHistory()
-    private var pending: PendingCommit?
+    private var state = WindowOrderState()
 
     /// The window treated as current at the last `orderedWindows()` call. The
     /// controller anchors the pre-selection on it. It is nil when nothing in
@@ -57,7 +61,7 @@ final class WindowOrderManager {
         isStarted = true
 
         // Seed from the current front-to-back z-order.
-        _ = history.arrange(visible: WindowEnumerator.currentWindows().map(\.id))
+        state = WindowOrderState(seed: WindowEnumerator.currentWindows().map(\.id))
 
         NSWorkspace.shared.notificationCenter.addObserver(
             self,
@@ -73,7 +77,7 @@ final class WindowOrderManager {
         isStarted = false
         NSWorkspace.shared.notificationCenter.removeObserver(self)
         focusObserver.stopObserving()
-        pending = nil
+        state.clearPending()
     }
 
     deinit {
@@ -94,35 +98,33 @@ final class WindowOrderManager {
     /// `currentWindowID` for this gesture.
     func orderedWindows() -> [WindowInfo] {
         let visible = WindowEnumerator.currentWindows()
-        let visibleIDs = Set(visible.map(\.id))
-        let before = history.order
+        let before = state.history.order
+        let pendingAtOpen = state.pending
 
-        let pendingAtOpen = pending
-        var queriedSystem = false
-        let current = WindowFocus.current(pending: pending, now: now, visible: visibleIDs) {
-            queriedSystem = true
-            return Self.systemFocusedWindow(in: visible)
-        }
-        currentWindowID = current
-
-        // Only windows that are gone are forgotten. Windows on another Space,
-        // hidden or minimised keep their place. If the full list can't be
-        // read, nothing is forgotten, rather than risk wiping the history.
-        let orderedIDs = history.prepareOpen(
+        let opened = state.open(
             visible: visible.map(\.id),
+            // Only windows that are gone are forgotten. Windows on another
+            // Space, hidden or minimised keep their place. If the full list
+            // can't be read, nothing is forgotten, rather than risk wiping
+            // the history.
             existing: WindowEnumerator.existingWindowIDs(),
-            current: current,
-            recentlyUsed: isRecentlyUsed
-        )
+            recentlyUsed: isRecentlyUsed,
+            now: now
+        ) {
+            WindowFocus.systemFocused(
+                frontmostPID: NSWorkspace.shared.frontmostApplication?.processIdentifier,
+                ownPID: getpid(),
+                visible: visible.map { (id: $0.id, pid: $0.pid) },
+                axFocused: WindowActivator.focusedWindowID(forPID:)
+            )
+        }
+        currentWindowID = opened.current
+
         var byID: [CGWindowID: WindowInfo] = [:]
         for window in visible { byID[window.id] = window }
-        let result = orderedIDs.compactMap { byID[$0] }
+        let result = opened.ordered.compactMap { byID[$0] }
 
-        logSnapshot(
-            before: before, visible: visible, current: current,
-            source: !queriedSystem && current != nil ? "pending" : (current == nil ? "none" : "system"),
-            pendingAtOpen: pendingAtOpen
-        )
+        logSnapshot(before: before, visible: visible, opened: opened, pendingAtOpen: pendingAtOpen)
         return result
     }
 
@@ -131,32 +133,15 @@ final class WindowOrderManager {
     func noteCommit(_ window: WindowInfo) {
         // Pending is recorded in both modes. In fixed mode it still anchors
         // the next open's pre-selection while the activation settles.
-        pending = PendingCommit(pid: window.pid, windowID: window.id, now: now)
-        promote(window.id, source: "commit")
-    }
-
-    /// The focused window as the system reports it: the frontmost app's
-    /// Accessibility focused window. If that window isn't one we list (a
-    /// palette or sheet, say), or the app doesn't support Accessibility, the
-    /// app's front-most listed window is used instead. Nil when this app's own
-    /// window is frontmost, or the frontmost app has no listed windows.
-    private static func systemFocusedWindow(in visible: [WindowInfo]) -> CGWindowID? {
-        guard let app = NSWorkspace.shared.frontmostApplication else { return nil }
-        let pid = app.processIdentifier
-        guard pid != getpid() else { return nil }
-        if let id = WindowActivator.focusedWindowID(forPID: pid), visible.contains(where: { $0.id == id }) {
-            return id
-        }
-        return visible.first(where: { $0.pid == pid })?.id
-    }
-
-    /// Promotes in recently-used mode only. In fixed mode positions never
-    /// move. `source` only labels the diagnostic log line.
-    private func promote(_ id: CGWindowID, source: String) {
-        guard isRecentlyUsed else { return }
-        let before = history.order
-        history.promote(id)
-        MRULog.info("promote \(MRULog.describe(id)) source=\(source) before=\(MRULog.describe(before)) after=\(MRULog.describe(history.order))")
+        let before = state.history.order
+        state.commit(
+            pid: window.pid,
+            windowID: window.id,
+            frontmostPID: NSWorkspace.shared.frontmostApplication?.processIdentifier,
+            recentlyUsed: isRecentlyUsed,
+            now: now
+        )
+        logChange("commit \(MRULog.describe(window.id)) expectsActivation=\(state.pending?.expectsActivation ?? false)", before: before)
     }
 
     @objc private func appDidActivate(_ note: Notification) {
@@ -164,54 +149,56 @@ final class WindowOrderManager {
             let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
         else { return }
         let pid = app.processIdentifier
-        let frontmost = NSWorkspace.shared.frontmostApplication?.processIdentifier
+        let before = state.history.order
 
         var axFocused: CGWindowID?
-        let outcome = WindowFocus.onActivation(
-            notifiedPID: pid,
-            frontmostPID: frontmost,
-            ownPID: getpid(),
-            pending: pending,
-            now: now
+        let outcome = state.activation(
+            notifiedPID: pid, ownPID: getpid(), recentlyUsed: isRecentlyUsed, now: now
         ) {
             axFocused = WindowActivator.focusedWindowID(forPID: pid)
             return axFocused
         }
-        if outcome.clearPending { pending = nil }
-
-        MRULog.info(
-            "didActivate pid=\(pid)(\(app.localizedName ?? "?")) frontmostNow=\(frontmost.map(String.init) ?? "nil")"
-            + " axFocused=\(MRULog.describe(axFocused)) decision=\(outcome.decision) clearPending=\(outcome.clearPending)"
+        logChange(
+            "didActivate pid=\(pid)(\(app.localizedName ?? "?")) axFocused=\(MRULog.describe(axFocused))"
+            + " decision=\(outcome.decision) clearPending=\(outcome.clearPending)",
+            before: before
         )
 
-        if case .promote(let id) = outcome.decision {
-            promote(id, source: "didActivate")
+        switch outcome.decision {
+        case .ignoreStale:
+            // It predates our own switch, so keep watching whichever app the
+            // observer is on. Our activation retargets it when it arrives.
+            break
+        case .ignoreOwnApp:
+            focusObserver.stopObserving()
+        case .promote, .ignoreNoFocusedWindow:
+            observeFocus(of: pid)
         }
-        // Follow whichever app is really frontmost now. For a stale
-        // notification, that is not the app it names.
-        observeFocus(of: frontmost ?? pid)
     }
 
     /// The observed app moved keyboard focus to another of its windows.
     private func focusedWindowDidChange(pid: pid_t, windowID: CGWindowID) {
-        let frontmost = NSWorkspace.shared.frontmostApplication?.processIdentifier
-        let outcome = WindowFocus.onFocusedWindowChanged(
-            pid: pid, windowID: windowID, frontmostPID: frontmost, pending: pending, now: now
+        let before = state.history.order
+        let outcome = state.focusChanged(pid: pid, windowID: windowID, recentlyUsed: isRecentlyUsed, now: now)
+        logChange(
+            "focusChanged pid=\(pid) window=\(MRULog.describe(windowID))"
+            + " decision=\(outcome.decision) clearPending=\(outcome.clearPending)",
+            before: before
         )
-        if outcome.clearPending { pending = nil }
-        MRULog.info("focusChanged pid=\(pid) window=\(MRULog.describe(windowID)) decision=\(outcome.decision) clearPending=\(outcome.clearPending)")
-        if case .promote(let id) = outcome.decision {
-            promote(id, source: "focusChanged")
-        }
     }
 
     // MARK: - Diagnostics (no-ops unless MRULog is enabled)
 
+    private func logChange(_ event: @autoclosure () -> String, before: [CGWindowID]) {
+        guard MRULog.isEnabled else { return }
+        let after = state.history.order
+        MRULog.info(event() + (after == before ? " order unchanged" : " order \(MRULog.describe(before)) → \(MRULog.describe(after))"))
+    }
+
     private func logSnapshot(
         before: [CGWindowID],
         visible: [WindowInfo],
-        current: CGWindowID?,
-        source: String,
+        opened: WindowOrderState.Opened,
         pendingAtOpen: PendingCommit?
     ) {
         guard MRULog.isEnabled else { return }
@@ -219,14 +206,16 @@ final class WindowOrderManager {
 
         let zFront = visible.first?.id
         let focus = MRULog.actualFocus()
-        let dropped = before.filter { !history.order.contains($0) }
+        let order = state.history.order
+        let dropped = before.filter { !order.contains($0) }
+        let source = opened.current == nil ? "none" : (opened.currentFromPending ? "pending" : "system")
         MRULog.info(
             "open mode=\(AppSettings.shared.windowOrder.rawValue)"
-            + " current=\(MRULog.describe(current)) source=\(source)"
+            + " current=\(MRULog.describe(opened.current)) source=\(source)"
             + " pending=\(pendingAtOpen.map { "\(MRULog.describe($0.windowID)) live=\($0.isLive(at: now))" } ?? "nil")"
             + " zFront=\(MRULog.describe(zFront))"
             + " systemFocused=\(MRULog.describe(focus?.windowID)) frontmostApp=\(focus.map { "\($0.pid)(\($0.app))" } ?? "nil")"
-            + " order=\(MRULog.describe(history.order))"
+            + " order=\(MRULog.describe(order))"
             + (dropped.isEmpty ? "" : " dropped=\(MRULog.describe(dropped))")
         )
 
@@ -235,14 +224,14 @@ final class WindowOrderManager {
         if let focused = focus?.windowID, focused != zFront {
             MRULog.info("zorder-lag zFront=\(MRULog.describe(zFront)) systemFocused=\(MRULog.describe(focused))")
         }
-        if source == "pending", let focused = focus?.windowID, focused != current {
-            MRULog.info("system still settling: using pending \(MRULog.describe(current)), system reports \(MRULog.describe(focused))")
+        if opened.currentFromPending, let focused = focus?.windowID, focused != opened.current {
+            MRULog.info("system still settling: using pending \(MRULog.describe(opened.current)), system reports \(MRULog.describe(focused))")
         }
 
-        // An invariant. In recently-used mode the current window must head
-        // the list, or the pre-selection is wrong.
-        if isRecentlyUsed, let current, history.order.first != current {
-            MRULog.anomaly("head-not-current", "head=\(MRULog.describe(history.order.first)) current=\(MRULog.describe(current))")
+        // The one ordering invariant. In recently-used mode the current
+        // window must head the list, or the pre-selection is wrong.
+        if isRecentlyUsed, let current = opened.current, order.first != current {
+            MRULog.anomaly("head-not-current", "head=\(MRULog.describe(order.first)) current=\(MRULog.describe(current))")
         }
     }
 }

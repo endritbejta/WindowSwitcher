@@ -25,6 +25,9 @@ APP="$BUILD_DIR/WindowSwitcher.app"
 MACOS_DIR="$APP/Contents/MacOS"
 EXECUTABLE="$MACOS_DIR/WindowSwitcher"
 BUNDLE_ID="com.endritbejta.windowswitcher"
+# The placeholder id of every build before the rename. A grant from those
+# builds lives under this id, not the one above.
+LEGACY_BUNDLE_ID="com.example.windowswitcher"
 
 CERT_CN="WindowSwitcher Self-Signed"
 SIGN_KEYCHAIN="$HOME/Library/Keychains/windowswitcher-signing.keychain-db"
@@ -200,6 +203,9 @@ if [ -f "$DR_RECORD" ] && [ -n "$CURRENT_DR" ]; then
 		   you can do it yourself:
 
 		       tccutil reset Accessibility $BUNDLE_ID
+		       tccutil reset Accessibility $LEGACY_BUNDLE_ID   # grants from pre-rename builds
+
+		   or run ./reinstall.sh, which clears both ids and reinstalls.
 
 		MSG
 	fi

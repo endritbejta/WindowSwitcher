@@ -36,19 +36,17 @@ func test(_ name: String, _ body: () -> Void) {
 
 // MARK: - A model of the system, driven through the real rules
 //
-// `Driver` replays what `WindowOrderManager` and `SwitcherController` do:
-//   * `open` is `orderedWindows()` followed by the selection in `open()`;
-//   * `commit` is `noteCommit`;
-//   * `activation` is `appDidActivate`.
-// It feeds them the same pure functions with scripted system state, so lag,
-// stale notifications and Accessibility reporting the wrong window can be set
-// up exactly.
+// `Driver` scripts the macOS side: z-order, the frontmost app, what
+// Accessibility reports, and when notifications arrive. It hands each event
+// to the same `WindowOrderState` methods `WindowOrderManager` calls, and uses
+// `WindowFocus.systemFocused`, the same "current" fallback. So the scenarios
+// below test the shipping ordering logic, not a copy of it. The only thing
+// the Driver adds is the selection step from `SwitcherController.open()`.
 
 struct Win { let id: CGWindowID; let pid: pid_t; var onScreen = true }
 
 struct Driver {
-    var history = WindowHistory()
-    var pending: PendingCommit?
+    var state: WindowOrderState
     var now: Double = 100
     var recentlyUsed = true
 
@@ -59,14 +57,17 @@ struct Driver {
     var axFocused: [pid_t: CGWindowID] = [:]   // what Accessibility reports per app
     var axQueries = 0
 
+    var history: WindowHistory { state.history }
+    var pending: PendingCommit? { state.pending }
+
     init(_ windows: [Win], focused: CGWindowID) {
         self.windows = windows
         let w = windows.first { $0.id == focused }!
         frontmostPID = w.pid
         for win in windows.reversed() { axFocused[win.pid] = win.id }  // front-most window per app
         axFocused[w.pid] = focused
-        // Seed like `init()`: arrange the current z-order.
-        _ = history.arrange(visible: windows.map(\.id))
+        // Seed like `WindowOrderManager.start()`: the current z-order.
+        state = WindowOrderState(seed: windows.map(\.id))
     }
 
     var visible: [Win] { windows.filter { $0.onScreen && !closed.contains($0.id) } }
@@ -75,52 +76,51 @@ struct Driver {
     /// The settled, user-visible truth: what really has focus.
     var trulyFocused: CGWindowID? { frontmostPID.flatMap { axFocused[$0] } }
 
-    /// Opens the switcher and returns the list and the pre-selected window.
+    /// `orderedWindows()`, then the selection in `SwitcherController.open()`.
     mutating func open(reverse: Bool = false) -> (list: [CGWindowID], selected: CGWindowID, current: CGWindowID?) {
         let vis = visible
-        let visIDs = Set(vis.map(\.id))
         let front = frontmostPID, own = ownPID, ax = axFocused
         var queries = 0
-        let current = WindowFocus.current(pending: pending, now: now, visible: visIDs) {
-            // Mirrors WindowOrderManager.systemFocusedWindow.
-            guard let pid = front, pid != own else { return nil }
-            queries += 1
-            if let id = ax[pid], visIDs.contains(id) { return id }
-            return vis.first { $0.pid == pid }?.id
+        let opened = state.open(
+            visible: vis.map(\.id),
+            existing: Set(windows.map(\.id)).subtracting(closed),
+            recentlyUsed: recentlyUsed,
+            now: now
+        ) {
+            WindowFocus.systemFocused(
+                frontmostPID: front, ownPID: own,
+                visible: vis.map { (id: $0.id, pid: $0.pid) },
+                axFocused: { queries += 1; return ax[$0] }
+            )
         }
         axQueries += queries
-        let existing = Set(windows.map(\.id)).subtracting(closed)
-        let list = history.prepareOpen(visible: vis.map(\.id), existing: existing,
-                                       current: current, recentlyUsed: recentlyUsed)
         let index = WindowHistory.initialSelection(
-            count: list.count, anchor: list.firstIndex(of: current ?? 0), reverse: reverse)
-        return (list, list[index], current)
+            count: opened.ordered.count,
+            anchor: opened.current.flatMap { opened.ordered.firstIndex(of: $0) },
+            reverse: reverse
+        )
+        return (opened.ordered, opened.ordered[index], opened.current)
     }
 
+    /// `noteCommit`, with the frontmost app as macOS reports it at that moment.
     mutating func commit(_ id: CGWindowID) {
-        pending = PendingCommit(pid: pid(of: id), windowID: id, now: now)
-        if recentlyUsed { history.promote(id) }
+        state.commit(pid: pid(of: id), windowID: id, frontmostPID: frontmostPID,
+                     recentlyUsed: recentlyUsed, now: now)
     }
 
     /// An NSWorkspace didActivateApplication notification for `pid`, handled now.
     mutating func activation(_ pid: pid_t) {
         let ax = axFocused
         var queried = false
-        let outcome = WindowFocus.onActivation(
-            notifiedPID: pid, frontmostPID: frontmostPID, ownPID: ownPID,
-            pending: pending, now: now) { queried = true; return ax[pid] }
+        state.activation(notifiedPID: pid, ownPID: ownPID, recentlyUsed: recentlyUsed, now: now) {
+            queried = true; return ax[pid]
+        }
         if queried { axQueries += 1 }
-        if outcome.clearPending { pending = nil }
-        if case .promote(let id) = outcome.decision, recentlyUsed { history.promote(id) }
     }
 
-    /// An AX focused-window-changed event from the observed app. This mirrors
-    /// `WindowOrderManager.focusedWindowDidChange`.
+    /// An AX focused-window-changed event from the observed app.
     mutating func focusChanged(_ pid: pid_t, to id: CGWindowID) {
-        let outcome = WindowFocus.onFocusedWindowChanged(
-            pid: pid, windowID: id, frontmostPID: frontmostPID, pending: pending, now: now)
-        if outcome.clearPending { pending = nil }
-        if case .promote(let w) = outcome.decision, recentlyUsed { history.promote(w) }
+        state.focusChanged(pid: pid, windowID: id, recentlyUsed: recentlyUsed, now: now)
     }
 
     /// The user moves focus to another window of the frontmost app, for
@@ -133,13 +133,16 @@ struct Driver {
         now += 0.3
     }
 
-    /// The system finishes carrying out a switch to `id`.
+    /// The system finishes carrying out a switch to `id`. Activation is
+    /// posted only when the app changes; same-app switches post an AX focus
+    /// event instead.
     mutating func systemSettles(on id: CGWindowID, notify: Bool = true) {
         let p = pid(of: id)
         let changedApp = frontmostPID != p
         frontmostPID = p
         axFocused[p] = id
-        if notify && changedApp { activation(p) }
+        guard notify else { return }
+        if changedApp { activation(p) } else { focusChanged(p, to: id) }
     }
 
     /// A quick tap (press and release) that is allowed to settle before the
@@ -258,50 +261,96 @@ test("a system-focused window that isn't listed gives no current window") {
 
 // MARK: - WindowFocus.onActivation
 
-func activation(notified: pid_t, frontmost: pid_t?, pending: PendingCommit? = nil,
+func activation(notified: pid_t, pending: PendingCommit? = nil,
                 now: Double = 10.1, ax: CGWindowID? = 7, axCalled: UnsafeMutablePointer<Bool>? = nil) -> WindowFocus.Outcome {
-    WindowFocus.onActivation(notifiedPID: notified, frontmostPID: frontmost, ownPID: 999,
+    WindowFocus.onActivation(notifiedPID: notified, ownPID: 999,
                              pending: pending, now: now) { axCalled?.pointee = true; return ax }
 }
 
 test("own app's activation is ignored") {
-    equal(activation(notified: 999, frontmost: 999).decision, .ignoreOwnApp)
+    equal(activation(notified: 999).decision, .ignoreOwnApp)
 }
 
-test("a stale notification (frontmost has moved on) is ignored") {
-    equal(activation(notified: 20, frontmost: 10).decision, .ignoreStale)
+test("with nothing settling, an activation is a real switch") {
+    equal(activation(notified: 30, ax: C), .init(decision: .promote(C), clearPending: false))
 }
 
-test("a stale notification for the pending app also clears the pending commit") {
-    let p = PendingCommit(pid: 20, windowID: B, now: 10)
-    equal(activation(notified: 20, frontmost: 10, pending: p), .init(decision: .ignoreStale, clearPending: true))
+test("while our cross-app commit settles, another app's activation predates it") {
+    var called = false
+    let p = PendingCommit(pid: 20, windowID: B, now: 10, expectsActivation: true)
+    equal(activation(notified: 30, pending: p, ax: C, axCalled: &called),
+          .init(decision: .ignoreStale, clearPending: false))
+    check(!called, "a stale activation shouldn't cost an AX round trip")
 }
 
 test("the activation we asked for promotes the committed window, not AX's sibling") {
     var called = false
     let p = PendingCommit(pid: 20, windowID: B, now: 10)
-    let o = activation(notified: 20, frontmost: 20, pending: p, ax: 77, axCalled: &called)
+    let o = activation(notified: 20, pending: p, ax: 77, axCalled: &called)
     equal(o, .init(decision: .promote(B), clearPending: true))
     check(!called, "AX should not be queried for our own commit")
 }
 
-test("an external activation promotes AX's focused window and supersedes pending") {
-    let p = PendingCommit(pid: 20, windowID: B, now: 10)
-    equal(activation(notified: 30, frontmost: 30, pending: p, ax: C), .init(decision: .promote(C), clearPending: true))
+test("after a same-app commit (no activation coming), another app's activation is real") {
+    let p = PendingCommit(pid: 20, windowID: B, now: 10, expectsActivation: false)
+    equal(activation(notified: 30, pending: p, ax: C), .init(decision: .promote(C), clearPending: true))
 }
 
 test("an activation after the pending commit expired is treated as external") {
     let p = PendingCommit(pid: 20, windowID: B, now: 10)
-    equal(activation(notified: 20, frontmost: 20, pending: p, now: 12, ax: 77),
-          .init(decision: .promote(77), clearPending: true))
+    equal(activation(notified: 30, pending: p, now: 12, ax: C), .init(decision: .promote(C), clearPending: true))
+    equal(activation(notified: 20, pending: p, now: 12, ax: 77), .init(decision: .promote(77), clearPending: true))
 }
 
 test("an app with no AX focused window promotes nothing") {
-    equal(activation(notified: 30, frontmost: 30, ax: nil).decision, .ignoreNoFocusedWindow)
+    equal(activation(notified: 30, ax: nil).decision, .ignoreNoFocusedWindow)
 }
 
-test("unknown frontmost (nil) does not count as stale") {
-    equal(activation(notified: 30, frontmost: nil, ax: C).decision, .promote(C))
+test("own app's activation drops an expired pending commit but keeps a live one") {
+    let p = PendingCommit(pid: 20, windowID: B, now: 10)
+    equal(activation(notified: 999, pending: p, now: 10.1).clearPending, false)
+    equal(activation(notified: 999, pending: p, now: 12).clearPending, true)
+}
+
+// MARK: - WindowOrderState.commit: does an activation follow?
+
+test("committing to another app expects its activation") {
+    var s = WindowOrderState(seed: [A, B])
+    s.commit(pid: 20, windowID: B, frontmostPID: 10, recentlyUsed: true, now: 0)
+    equal(s.pending?.expectsActivation, true)
+}
+
+test("committing within the frontmost app expects no activation") {
+    var s = WindowOrderState(seed: [A, B])
+    s.commit(pid: 10, windowID: A, frontmostPID: 10, recentlyUsed: true, now: 0)
+    equal(s.pending?.expectsActivation, false)
+}
+
+test("rapid second commit: the settling commit, not the lagging frontmost, decides") {
+    var s = WindowOrderState(seed: [A, B])
+    s.commit(pid: 20, windowID: B, frontmostPID: 10, recentlyUsed: true, now: 0)
+    // macOS still reports A's app frontmost, but our switch to B is in flight,
+    // so switching back to A *will* produce an activation.
+    s.commit(pid: 10, windowID: A, frontmostPID: 10, recentlyUsed: true, now: 0.02)
+    equal(s.pending?.expectsActivation, true)
+}
+
+// MARK: - WindowFocus.systemFocused
+
+test("systemFocused: AX focused window if listed, else the app's front-most listed window") {
+    let vis: [(id: CGWindowID, pid: pid_t)] = [(1, 10), (2, 20), (3, 20)]
+    equal(WindowFocus.systemFocused(frontmostPID: 20, ownPID: 999, visible: vis) { _ in 3 }, 3)
+    equal(WindowFocus.systemFocused(frontmostPID: 20, ownPID: 999, visible: vis) { _ in 42 }, 2, "unlisted panel → app's front window")
+    equal(WindowFocus.systemFocused(frontmostPID: 20, ownPID: 999, visible: vis) { _ in nil }, 2, "no AX support → app's front window")
+}
+
+test("systemFocused: nil for our own app, unknown frontmost, or an app with nothing listed") {
+    let vis: [(id: CGWindowID, pid: pid_t)] = [(1, 10)]
+    var asked = false
+    equal(WindowFocus.systemFocused(frontmostPID: 999, ownPID: 999, visible: vis) { _ in asked = true; return 1 }, nil)
+    check(!asked, "no AX call for our own app")
+    equal(WindowFocus.systemFocused(frontmostPID: nil, ownPID: 999, visible: vis) { _ in 1 }, nil)
+    equal(WindowFocus.systemFocused(frontmostPID: 30, ownPID: 999, visible: vis) { _ in nil }, nil)
 }
 
 // MARK: - End-to-end scenarios (the reported bug and its variants)
@@ -446,6 +495,19 @@ test("an external switch right after a commit isn't overridden by the pending co
     equal(r.selected, B)
 }
 
+test("a click on another app right after a same-app switch is recorded") {
+    // Chrome C1/C2 (pid 20), Terminal T (pid 10). Switch C1 → C2 (no app
+    // activation will come), then click Terminal within the pending lifetime.
+    let C1: CGWindowID = 2, C2: CGWindowID = 3, T: CGWindowID = 1
+    var d = Driver([Win(id: C1, pid: 20), Win(id: C2, pid: 20), Win(id: T, pid: 10)], focused: C1)
+    d.commit(C2)
+    d.now += 0.05
+    d.frontmostPID = 10; d.axFocused[10] = T   // Chrome never posts its focus event in time
+    d.activation(10)
+    equal(d.history.order.first, T, "must not be dropped as stale: no activation of ours was coming")
+    check(d.pending == nil)
+}
+
 test("fixed mode: tiles never move, a tap walks to the next tile") {
     var d = threeApps()
     d.recentlyUsed = false
@@ -524,29 +586,24 @@ test("property: random external switches and taps keep head == truly focused win
 
 // MARK: - In-app focus changes (WindowFocus.onFocusedWindowChanged)
 
-test("in-app focus change from the frontmost app promotes that window") {
-    equal(WindowFocus.onFocusedWindowChanged(pid: 20, windowID: 5, frontmostPID: 20, pending: nil, now: 0),
+test("in-app focus change promotes that window") {
+    equal(WindowFocus.onFocusedWindowChanged(pid: 20, windowID: 5, pending: nil, now: 0),
           .init(decision: .promote(5), clearPending: false))
-}
-
-test("in-app focus change from an app that is no longer frontmost is ignored") {
-    equal(WindowFocus.onFocusedWindowChanged(pid: 20, windowID: 5, frontmostPID: 10, pending: nil, now: 0).decision,
-          .ignoreStale)
 }
 
 test("while a commit settles, only the committed window gaining focus counts") {
     let p = PendingCommit(pid: 20, windowID: B, now: 10)
-    equal(WindowFocus.onFocusedWindowChanged(pid: 20, windowID: 77, frontmostPID: 20, pending: p, now: 10.1),
+    equal(WindowFocus.onFocusedWindowChanged(pid: 20, windowID: 77, pending: p, now: 10.1),
           .init(decision: .ignoreStale, clearPending: false), "sibling reported before the raise")
-    equal(WindowFocus.onFocusedWindowChanged(pid: 10, windowID: A, frontmostPID: 10, pending: p, now: 10.1),
-          .init(decision: .ignoreStale, clearPending: false), "the app being left is still frontmost")
-    equal(WindowFocus.onFocusedWindowChanged(pid: 20, windowID: B, frontmostPID: 20, pending: p, now: 10.1),
+    equal(WindowFocus.onFocusedWindowChanged(pid: 10, windowID: A, pending: p, now: 10.1),
+          .init(decision: .ignoreStale, clearPending: false), "a last event from the app being left")
+    equal(WindowFocus.onFocusedWindowChanged(pid: 20, windowID: B, pending: p, now: 10.1),
           .init(decision: .promote(B), clearPending: true))
 }
 
 test("after the pending lifetime, an in-app change is a normal promotion") {
     let p = PendingCommit(pid: 20, windowID: B, now: 10)
-    equal(WindowFocus.onFocusedWindowChanged(pid: 20, windowID: 77, frontmostPID: 20, pending: p, now: 12),
+    equal(WindowFocus.onFocusedWindowChanged(pid: 20, windowID: 77, pending: p, now: 12),
           .init(decision: .promote(77), clearPending: true))
 }
 
@@ -623,6 +680,13 @@ test("lost release: a bare trigger keystroke commits and is let through") {
     var g = GestureTracker(triggerKeyCode: tab)
     _ = g.keyDown(keyCode: tab, modifierHeld: true, shiftHeld: false)
     equal(g.keyDown(keyCode: tab, modifierHeld: false, shiftHeld: false), .init(swallow: false, action: .commit))
+}
+
+test("lost release: Escape still cancels (and is swallowed) rather than committing") {
+    var g = GestureTracker(triggerKeyCode: tab)
+    _ = g.keyDown(keyCode: tab, modifierHeld: true, shiftHeld: false)
+    equal(g.keyDown(keyCode: esc, modifierHeld: false, shiftHeld: false), .init(swallow: true, action: .cancel))
+    check(!g.isActive)
 }
 
 test("lost release: resync from live flags commits once; held modifier changes nothing") {

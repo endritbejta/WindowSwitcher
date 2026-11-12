@@ -223,8 +223,9 @@ timestamp, including how each activation was handled (promoted, or ignored as
 stale or as this app's own). Lines where the switcher's state disagrees with
 what actually has focus are prefixed `ANOMALY <kind>`:
 
-- `head-not-current` and `selection-anchor-not-head` mean an ordering invariant
-  broke. They should never appear.
+- `head-not-current` means the ordering invariant broke: in recently-used
+  mode, the current window wasn't at the head of the list. It should never
+  appear.
 - `activation-not-front` and `focus-sibling` mean macOS didn't carry out a
   switch as asked.
 - `tap-disabled` means the key-event tap was turned off by the system.
@@ -296,7 +297,7 @@ confirm the requirements match.
 | Concern | Approach | File |
 |---|---|---|
 | Discover all real windows | `CGWindowListCopyWindowInfo`, filtered to layer‑0, visible, non‑system windows | `WindowEnumerator.swift` |
-| Window ordering | Fixed (stable positions) or recently‑used. Own history, promoted from the actually focused window (never the lagging z‑order), the switcher's own commits, non‑stale app activations, and focus moving between one app's windows (AX observer on the frontmost app only); unit‑tested rules | `WindowHistory.swift`, `WindowOrderManager.swift`, `FocusObserver.swift` |
+| Window ordering | Fixed (stable positions) or recently‑used. Own history, promoted from the actually focused window (never the lagging z‑order), the switcher's own commits, app activations that don't predate a commit still settling, and focus moving between one app's windows (AX observer on the frontmost app only). All state and rules live in one pure type, which the unit tests drive directly | `WindowHistory.swift`, `WindowOrderManager.swift`, `FocusObserver.swift` |
 | Global shortcut, and detecting modifier **release** | `CGEvent` tap on keyDown + flagsChanged. The callback only decides whether to swallow; the work runs after it returns; a lost release is recovered from the live modifier state | `HotKeyManager.swift`, `GestureTracker.swift` |
 | Focus one specific window | Accessibility API + `_AXUIElementGetWindow` to match by CGWindowID | `WindowActivator.swift` |
 | Live previews | On‑demand ScreenCaptureKit stills rendered at preview size, off the main thread | `ThumbnailProvider.swift` |
@@ -388,8 +389,8 @@ WindowSwitcher/
     ├── DisplayLayout.swift      # Screen geometry: CG <-> Cocoa coords, window -> display
     ├── WindowEnumerator.swift   # Discover + filter real windows
     ├── WindowInfo.swift         # Value type for one window (id, title, app, icon, display)
-    ├── WindowHistory.swift      # Pure ordering rules: history, current window, activation filter
-    ├── WindowOrderManager.swift # Feeds live system state into WindowHistory
+    ├── WindowHistory.swift      # Pure ordering state + rules (WindowOrderState), unit-tested
+    ├── WindowOrderManager.swift # I/O only: feeds live system state into WindowOrderState
     ├── FocusObserver.swift      # AX observer: focus moving between the frontmost app's windows
     ├── MRULog.swift             # Opt-in ordering diagnostics (os_log "mru")
     ├── WindowActivator.swift    # Focus one window by CGWindowID (AX API)
